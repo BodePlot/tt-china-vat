@@ -1,0 +1,563 @@
+# =============================================================================
+# Reglas por tipo de documento.
+# Los nombres de campo llevan el numero del machete (f11..f20) para cruzar
+# directo contra el Excel de reglas de reconciliacion.
+#
+# Estrategias de localizacion disponibles:
+#   inline     -> valor en la MISMA caja que la etiqueta, tras un separador
+#   below      -> valor en la caja de abajo, alineada horizontalmente (celda)
+#   right      -> valor en la caja de la derecha, alineada verticalmente
+#   in_label   -> el valor esta dentro del texto de la etiqueta (ej. codigos)
+#   page_regex -> patron buscado en todo el texto de la pagina
+#   table_col  -> columna de tabla, definida por sus headers
+# =============================================================================
+
+doc_types:
+
+  # ---------------------------------------------------------------------------
+  customs_declaration:
+    label_es: "Declaracion de exportacion de aduana"
+    label_zh: "中华人民共和国海关出口货物报关单"
+
+    # Firma: como se reconoce esta pagina. Se evalua sobre el texto normalizado.
+    signature:
+      required:                  # TODAS deben aparecer
+        - "出口货物报关单"        # (export goods customs declaration form)
+        - "海关编号"              # (customs number)
+      optional:                  # suman score, no son obligatorias
+        - "预录入编号"            # (pre-entry number)
+        - "申报日期"              # (declaration date)
+        - "随附单证及编号"        # (attached documents and numbers)
+        - "标记唛码及备注"        # (marks and remarks)
+        - "报关人员"              # (declarant)
+      negative:                  # si aparecen, NO es este tipo
+        - "通关无纸化出口放行通知书"
+
+    fields:
+
+      f11_customs_no:
+        desc_zh: "海关编号"                     # (customs declaration number)
+        strategy: inline
+        label: "海关编号"
+        sep: "："
+        regex: '\d{18}'
+        # se repite en el codigo de barras y en 预录入编号 -> se usa para validar
+        corroborate:
+          - {strategy: page_regex, regex: '\*(\d{18})\*'}
+          - {strategy: inline, label: "预录入编号", sep: "：", regex: '\d{18}'}
+
+      f12_commodity_name:
+        desc_zh: "商品名称"                     # (commodity name)
+        strategy: table_col
+        table:
+          header_from: "商品编号"               # (HS code) la col arranca aca
+          header_to: "数量及单位"               # (quantity & unit) y termina aca
+        line: 1                                 # primera linea de la celda
+        strip_prefix: '^\d{10}'                 # saca el HS code pegado por OCR
+
+      f13_specification:
+        desc_zh: "规格型号"                     # (specification / model)
+        strategy: table_col
+        table:
+          header_from: "商品编号"
+          header_to: "数量及单位"
+        line: "2+"                              # resto de lineas, concatenadas
+        join: ""
+
+      f14_bl_no:
+        desc_zh: "提运单号"                     # (bill of lading number)
+        strategy: below
+        label: "提运单号"
+        regex: '^[A-Z0-9/\-]{6,}$'
+
+      f15_transport_mode:
+        desc_zh: "运输方式"                     # (mode of transport)
+        strategy: below
+        label: "运输方式"
+        code_from_label: '\((\d+)\)'            # el (2) vive en la etiqueta
+
+      f16_container_nos:
+        desc_zh: "集装箱号"                     # (container numbers)
+        strategy: page_regex
+        regex: '[A-Z]{4}\d{7}'                  # formato ISO 6346
+        multi: true
+        unique: true
+
+      f17_contract_no:
+        desc_zh: "合同协议号"                   # (contract / agreement no.)
+        strategy: below
+        label: "合同协议号"
+        regex: '^[A-Z0-9\-]{4,}$'
+
+      f18_net_weight:
+        desc_zh: "净重(千克)"                   # (net weight, kg)
+        strategy: below
+        label: "净重"
+        type: number
+
+      f19_gross_weight:
+        desc_zh: "毛重(千克)"                   # (gross weight, kg)
+        strategy: below
+        label: "毛重"
+        type: number
+
+      f20_price_block:
+        desc_zh: "单价/总价/币制"               # (unit price / total / currency)
+        strategy: table_col
+        table:
+          header_from: "单价/总价/币制"
+          header_to: "原产国"                   # (country of origin)
+        split_lines:                            # 3 valores apilados en la celda
+          - {name: unit_price, type: number}
+          - {name: total_price, type: number}
+          - {name: currency,    type: text}
+
+      # auxiliares: no estan en el machete pero habilitan validacion cruzada
+      aux_quantity:
+        desc_zh: "数量及单位"                   # (quantity & unit)
+        strategy: table_col
+        table:
+          header_from: "数量及单位"
+          header_to: "单价/总价/币制"
+        line: 1
+        regex: '([\d.]+)'
+        type: number
+
+    # Chequeos internos: si fallan, la lectura del OCR es sospechosa
+    validations:
+      - {rule: "f18_net_weight <= f19_gross_weight", severity: error}
+      - {rule: "aux_quantity * f20_price_block.unit_price == f20_price_block.total_price",
+         tolerance: 0.01, severity: error}
+      - {rule: "f11_customs_no corroborated", severity: error}
+
+  # ---------------------------------------------------------------------------
+  export_release_notice:
+    label_es: "Aviso de liberacion de exportacion sin papel"
+    label_zh: "通关无纸化出口放行通知书"
+
+    signature:
+      required:
+        - "通关无纸化出口放行通知书"
+      optional:
+        - "海关编号"
+        - "预录入编号"
+      negative: []
+
+    fields:
+      f11_customs_no:
+        desc_zh: "海关编号"
+        strategy: below
+        label: "海关编号"
+        regex: '\d{18}'
+      f14_bl_no:
+        desc_zh: "提运单号"
+        strategy: below
+        label: "提运单号"
+      f17_contract_no:
+        desc_zh: "合同协议号"
+        strategy: below
+        label: "合同协议号"
+      f18_net_weight:
+        desc_zh: "净重（千克）"
+        strategy: below
+        label: "净重"
+        type: number
+      f19_gross_weight:
+        desc_zh: "毛重（千克）"
+        strategy: below
+        label: "毛重"
+        type: number
+
+  # ---------------------------------------------------------------------------
+  # Los tipos de aca abajo solo tienen signature (para que clasifiquen y dejen
+  # de dar UNRESOLVED). Todavia no tienen fields: falta cruzarlos contra el
+  # Excel de reglas de reconciliacion para saber que machete (f21, f22...)
+  # les corresponde a cada uno.
+  # ---------------------------------------------------------------------------
+
+  export_invoice:
+    label_es: "Factura electronica de IVA (fapiao) de exportacion"
+    label_zh: "电子发票（普通发票）"
+    # 3.3 Export Invoice.pdf -- pagina unica, texto nativo.
+
+    signature:
+      required:
+        - "电子发票"
+        - "发票号码"
+      optional:
+        - "开票日期"
+        - "价税合计"
+        - "统一社会信用代码"
+      negative:
+        - "商业发票"
+
+    fields:
+
+      # page_regex en vez de inline: en el PDF nativo la etiqueta y el
+      # numero viven en DOS cajas de texto separadas (no en la misma linea
+      # como en un escaneo), asi que inline (que exige una sola caja) no
+      # los encuentra. page_regex no le importa la caja, solo el texto.
+      f21_invoice_no:
+        desc_zh: "发票号码"                     # (invoice number)
+        strategy: page_regex
+        regex: '发票号码[：:]\s*(\d{18,22})'
+
+      # el resto de los datos de cruce no vive en las casillas del fapiao
+      # sino en el renglon "备注" (remarks) que el vendedor escribe a mano:
+      # "INV#... 汇率：... USD:... CDF#... SO#... PO#...". Por eso van por
+      # page_regex en vez de inline/below.
+
+      f22_contract_no:
+        desc_zh: "SO (notes line)"
+        strategy: page_regex
+        regex: 'S[O0]#0*(\d+)'
+        type: number
+
+      f23_amount_usd:
+        desc_zh: "USD (notes line)"
+        strategy: page_regex
+        regex: 'USD[:：]\s*([\d,]+\.?\d*)'
+        type: number
+
+      f24_amount_cny:
+        desc_zh: "价税合计（小写）"
+        strategy: page_regex
+        regex: '\(小写\)\s*¥?([\d,]+\.\d{2})'
+        type: number
+
+      f25_product_name:
+        desc_zh: "项目名称"                     # (item/product name)
+        strategy: table_col
+        table:
+          header_from: "项目名称"
+          header_to: "规格型号"
+        line: 1
+
+      f26_spec_model:
+        desc_zh: "规格型号 (packaging)"
+        strategy: table_col
+        table:
+          header_from: "规格型号"
+          header_to: "单位"
+        line: "2+"
+        join: ""
+
+      f27_quantity:
+        desc_zh: "数量"                         # (quantity)
+        strategy: table_col
+        table:
+          header_from: "数量"
+          header_to: "单价"
+        line: 1
+        type: number
+
+      f28_cdf_no:
+        desc_zh: "CDF (notes line)"
+        strategy: page_regex
+        regex: 'CDF#(\d{18})'
+
+      f29_billing_no:
+        desc_zh: "INV (notes line)"
+        strategy: page_regex
+        regex: 'INV#([A-Z0-9]+)'
+
+  # ---------------------------------------------------------------------------
+  # 3.5 Sales Contract.pdf en realidad trae TRES documentos distintos en un
+  # solo PDF: contrato (pag 1), factura comercial (pag 5) y packing list
+  # (pag 6). Las paginas 2-4 son terminos y condiciones (boilerplate) y ya
+  # las saltea el triage por tamano de caja, no necesitan signature.
+
+  sales_contract:
+    label_es: "Contrato de venta"
+    label_zh: "销售合同"
+
+    signature:
+      required:
+        - "销售合同"
+      optional:
+        - "合同号"
+        - "成交方式"
+        - "物料号"
+      negative:
+        - "商业发票"
+        - "装箱单"
+
+    fields:
+
+      f33_contract_no:
+        desc_zh: "合同号"                        # (contract no.)
+        strategy: right
+        label: "合同号"
+        type: number
+
+      # "数量" en la tabla del contrato (toneladas) es lo que el Excel de
+      # reglas llama 'Net Weight' para este documento -- el machete cruza
+      # por item code, no por como se llame el campo en cada planilla.
+      f34_net_weight:
+        desc_zh: "数量 (tons, table)"
+        strategy: table_col
+        table:
+          header_from: "数量"
+          header_to: "单位"
+        line: 1
+        type: number
+
+      f35_amount_usd:
+        desc_zh: "金额 (table)"
+        strategy: table_col
+        table:
+          header_from: "金额"
+        line: 1
+        type: number
+
+  commercial_invoice:
+    label_es: "Factura comercial"
+    label_zh: "商业发票"
+
+    signature:
+      required:
+        - "商业发票"
+      optional:
+        - "发票号"
+        - "发票日期"
+        - "Bill to"
+      negative:
+        - "电子发票"
+        - "销售合同"
+        - "装箱单"
+
+    fields: {}
+
+  packing_list:
+    label_es: "Lista de empaque"
+    label_zh: "装箱单"
+
+    signature:
+      required:
+        - "装箱单"
+      optional:
+        - "总净重"
+        - "总毛重"
+        - "包装数量"
+        - "包装方式"
+      negative:
+        - "商业发票"
+        - "销售合同"
+
+    fields: {}
+
+  # ---------------------------------------------------------------------------
+  bill_of_lading:
+    label_es: "Orden de embarque de contenedores"
+    label_zh: "集装箱货物托运单"
+    # 3.7.1 Bill of Lading.pdf -- pagina unica, texto nativo.
+
+    signature:
+      required:
+        - "集装箱货物托运单"
+      optional:
+        - "发货人"
+        - "收货人"
+        - "通知人"
+        - "装货港"
+        - "卸货港"
+      negative: []
+
+    fields:
+
+      # numero de control impreso en la franja superior del formulario
+      # (casillero "A NNNNNNNNNN"), distinto del D/R No. del cuerpo.
+      f41_bl_no:
+        desc_zh: "control number (top strip)"
+        strategy: page_regex
+        regex: 'A\d{9,10}'
+
+      f42_means_transport:
+        desc_zh: "vessel/voyage/port of loading"
+        strategy: below
+        label: "Ocean Vessel"
+
+      f43_container_nos:
+        desc_zh: "container number(s)"
+        strategy: page_regex
+        regex: '[A-Z]{4}\d{7}'
+        multi: true
+        unique: true
+
+      # el header de la columna viene en DOS lineas ("Gross Weight" +
+      # "毛重(公斤)"); anclar en la linea china evita que la propia
+      # segunda linea del header se cuele como si fuera la primera fila
+      # de datos (header_y quedaria justo en el limite y la incluiria).
+      f44_gross_weight:
+        desc_zh: "毛重(公斤)"                    # (Gross Weight)
+        strategy: table_col
+        table:
+          header_from: "毛重"
+          header_to: "尺码"
+        line: 1
+        type: number
+
+  # ---------------------------------------------------------------------------
+  # 3.7.2 Cargo Manifest.pdf tambien trae dos "vistas" distintas: la portada
+  # con los totales (pag 1) y el detalle de contenedor/seal/peso (pag 2). La
+  # pag 3 es puro texto legal y no matchea ninguna de las dos a proposito.
+
+  cargo_manifest:
+    label_es: "Waybill / manifiesto de carga (portada)"
+    label_zh: ""
+
+    signature:
+      required:
+        - "NON-NEGOTIABLE WAYBILL"
+      optional:
+        - "MAERSK"
+        - "SCAC"
+        - "Port of Loading"
+        - "Port of Discharge"
+      negative: []
+
+    fields:
+
+      # "Export references" (casillero de la portada) se repite en el
+      # cuerpo como "SO NO : NNNNNNN" -- se usa esa segunda aparicion
+      # porque el casillero enmarcado ocr-ea peor que el texto corrido.
+      f46_contract_no:
+        desc_zh: "SO NO (body text)"
+        strategy: page_regex
+        regex: 'SO\s*NO\s*[:：]?\s*(\d+)'
+        type: number
+
+      f47_gross_weight:
+        desc_zh: "weight (KGS)"
+        strategy: page_regex
+        regex: '([\d,]+\.\d+)\s*KGS'
+        type: number
+
+  cargo_manifest_detail:
+    label_es: "Manifiesto de carga - detalle de contenedores (pagina 2)"
+    label_zh: ""
+    # OJO: fields/3.7.2.pdf (machete visual anotado a mano) marca el item 45
+    # sobre "Voyage No." (510S) en la pagina 1, no sobre el numero de
+    # contenedor de esta pagina. Se decidio a proposito NO seguir esa
+    # anotacion: rules.xlsx dice explicitamente "Container No." para el
+    # item 45, y los contenedores leidos aca (MRKU0030781, MRKU0885679)
+    # matchean exacto contra customs_declaration/bill_of_lading/
+    # shipping_order (regla 7 de reconciliation.yaml). La imagen de
+    # referencia probablemente esta mal anotada (no incluye esta pagina).
+
+    signature:
+      required:
+        - "Shipper Seal"
+      optional:
+        - "DRY"
+        - "KGS"
+        - "CBM"
+      negative: []
+
+    fields:
+
+      f45_container_nos:
+        desc_zh: "container number(s)"
+        strategy: page_regex
+        regex: '[A-Z]{4}\d{7}'
+        multi: true
+        unique: true
+
+  # ---------------------------------------------------------------------------
+  # 3.7.4.3 Shipping Order.xlsx -- no es un formulario escaneado sino un log
+  # de despacho interno (una fila por camion, no una pagina por documento).
+  # Por eso el unico locator que le sirve es xlsx_col (columna por header),
+  # no los de OCR/texto nativo que usan el resto de los tipos.
+  #
+  # De sus 7 columnas (item code 57-63 en rules.xlsx), SOLO Container No.
+  # (item 58) aparece en un cruce real (regla 7, contra CDF/BOL/Cargo
+  # Manifest/Delivery Note -- ver reconciliation.yaml). El resto (SO,
+  # fecha de transporte, patente, peso neto, origen, destino) no participa
+  # en ninguna regla del machete, asi que no se agregan todavia.
+  shipping_order:
+    label_es: "Orden de embarque (log de despacho interno)"
+    label_zh: "运单"
+    source_ext: xlsx
+
+    signature:
+      required:
+        - "运单ID"
+      optional:
+        - "集装箱1"
+        - "SAP订单号"
+        - "SAP-Shipment"
+      negative: []
+
+    fields:
+      f58_container_no:
+        desc_zh: "集装箱1"                      # (Container No. 1)
+        strategy: xlsx_col
+        header: "集装箱1"
+        regex: '[A-Z]{4}\d{7}'
+        multi: true
+        unique: true
+
+  # ---------------------------------------------------------------------------
+  # 3.1 Export Tax Refund Filing Directory.xlsx -- registro de archivo, una
+  # fila por exportacion. NO es el mismo tab "Data Source" que arma rules.xlsx
+  # (a ese le faltan tasa de IVA, tasa de reintegro, cantidad y montos), pero
+  # comparte 出口报告单号 (CDF) y 出口发票号 (factura VAT) con ese grupo, que
+  # es lo que piden las reglas 1, 2 y 13 de reconciliation.yaml.
+  #
+  # OJO -- calidad de dato: en el sample, 出口报告单号 y 出口发票号 estan
+  # guardados como NUMERO en el Excel (no texto), y tienen 18-20 digitos:
+  # mas de lo que un float64 puede representar sin perder precision (~15-17
+  # digitos). El valor que se lee YA viene con los ultimos digitos en cero
+  # respecto del original (ej. 533820250380000144 -> 533820250380000000).
+  # No es un bug de la extraccion: el dato ya llego roto adentro del xlsx.
+  # Un cruce exacto de digitos contra estos dos campos va a fallar aunque
+  # todo lo demas sea correcto -- documentar, no autocorregir en silencio.
+  tax_filing_directory:
+    label_es: "Registro de archivo de reintegro de IVA a la exportacion"
+    label_zh: "出口退税备案目录"
+    source_ext: xlsx
+
+    signature:
+      required:
+        - "单证备案日期"
+        - "出口退税申报日期"
+      optional:
+        - "企业办税员"
+        - "出口报告单号"
+      negative: []
+
+    fields:
+      cdf_no_ref:
+        desc_zh: "出口报告单号"                  # (CDF number -- ver nota de precision arriba)
+        strategy: xlsx_col
+        header: "出口报告单号"
+
+      so_no_ref:
+        desc_zh: "合同协议号（SO）"
+        strategy: xlsx_col
+        header: "合同协议号（SO）"
+
+      vat_invoice_no_ref:
+        desc_zh: "出口发票号"                    # (VAT invoice number -- ver nota de precision arriba)
+        strategy: xlsx_col
+        header: "出口发票号"
+
+      export_date_ref:
+        desc_zh: "出口日期"
+        strategy: xlsx_col
+        header: "出口日期"
+
+      tax_analyst:
+        desc_zh: "企业办税员"
+        strategy: xlsx_col
+        header: "企业办税员"
+
+      filing_period:
+        desc_zh: "单证备案日期"
+        strategy: xlsx_col
+        header: "单证备案日期"
+
+      refund_application_date:
+        desc_zh: "出口退税申报日期"
+        strategy: xlsx_col
+        header: "出口退税申报日期"

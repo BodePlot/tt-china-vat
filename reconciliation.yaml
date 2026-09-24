@@ -1,0 +1,177 @@
+# =============================================================================
+# Reglas de reconciliacion entre documentos, decodificadas de rules.xlsx
+# (fila 4, "Validation"). Todavia NO hay motor que las corra -- ver el tab
+# "Reconciliacion" en gui.py, deshabilitado a proposito. Este archivo es
+# la traduccion 1:1 de esa fila a algo que un motor futuro pueda leer.
+#
+# 'item' es el "Item Code" de rules.xlsx (columna que numera cada campo del
+# machete, 1-84) -- sirve para volver a la planilla original si hace falta
+# reconfirmar una regla.
+#
+# 'ref' apunta al campo ya implementado en rules.yaml como "doc_type.field".
+# Cuando el documento fuente todavia no tiene extractor, ref queda null y
+# se deja una nota.
+#
+# El grupo "Data Source" / Refund Tool de rules.xlsx (items 1-10: numero de
+# CDF, numero de factura VAT, tasa de IVA, tasa de reintegro, cantidad,
+# montos USD/CNY, reintegro) no tiene un archivo que matchee esas columnas
+# exactas entre los samples. SI existe samples/3.1 Export Tax Refund Filing
+# Directory.xlsx (doc_type tax_filing_directory), que comparte numero de CDF
+# y numero de factura VAT con ese grupo -- se usa para los items 1 y 2 en
+# las reglas 1, 2 y 13. Le faltan tasa de IVA/reintegro/cantidad/montos, asi
+# que las reglas 11 y 12 (que necesitan Amount USD/CNY del Refund Tool)
+# siguen sin fuente.
+#
+# OJO: cdf_no_ref y vat_invoice_no_ref en tax_filing_directory vienen con
+# perdida de precision (ver nota en rules.yaml) -- un cruce EXACTO de
+# digitos contra estos dos campos especificamente va a fallar aunque el
+# resto de la cadena este bien. so_no_ref (el numero de SO) no tiene ese
+# problema y matchea exacto contra customs_declaration/export_invoice en
+# el sample (13194443).
+#
+# IMPORTANTE: de los 84 items que rules.xlsx define, solo estos 13 renglones
+# de la fila "Validation" tienen algo cargado. Todo lo demas (items 30-40,
+# 48-57, 59-64, 66-84 -- Bank Receipt, Customs Clearance Expenses, Domestic
+# Transportation Invoice, ambas Detailed Reconciliation Statement (LSR), el
+# resto de Shipping Order, Delivery Note, Coordination & Management Fee,
+# Customs Declaration Fee Yili Guangzhou) esta definido estructuralmente en
+# el machete (existen las columnas) pero NO participa de ningun cruce.
+# =============================================================================
+
+rules:
+
+  - id: 1
+    desc: >
+      Customs declaration number (CDF) == CDF number from the Refund Tool.
+      The available source (tax_filing_directory.cdf_no_ref) has precision
+      loss -- see the data quality note above, this cross-check can give a
+      false negative even if the CDF is correct.
+    fields:
+      - {item: 11, ref: customs_declaration.f11_customs_no}
+      - {item: 1, ref: tax_filing_directory.cdf_no_ref,
+         note: "precision perdida (float64) -- no comparar digito a digito sin normalizar"}
+
+  - id: 2
+    desc: >
+      VAT invoice number == VAT invoice number from the Refund Tool. Same
+      precision caveat as rule 1.
+    fields:
+      - {item: 21, ref: export_invoice.f21_invoice_no}
+      - {item: 2, ref: tax_filing_directory.vat_invoice_no_ref,
+         note: "precision perdida (float64) -- no comparar digito a digito sin normalizar"}
+
+  - id: 3
+    desc: >
+      Product name: CDF == VAT invoice. Verified by hand against samples/:
+      the CDF reads "均聚聚丙烯" (technical name) and the invoice
+      "*化学合成材料*聚丙烯" (fapiao tax category + generic name) -- they're
+      the same product but will NEVER be the same text, neither one is
+      misread. Not verifiable by exact equality.
+    verifiable: false
+    fields:
+      - {item: 12, ref: customs_declaration.f12_commodity_name}
+      - {item: 25, ref: export_invoice.f25_product_name}
+
+  - id: 4
+    desc: >
+      Product type: CDF == VAT invoice. Verified by hand: the CDF field is
+      the CHEMICAL spec ("4|1|白色颗粒状...丙烯100%..."), the invoice's is
+      the PACKAGING format ("BG 25KGX60") -- two different pieces of data
+      that the checklist groups under the same item, not the same
+      information. Not verifiable by exact equality.
+    verifiable: false
+    fields:
+      - {item: 13, ref: customs_declaration.f13_specification}
+      - {item: 26, ref: export_invoice.f26_spec_model}
+
+  - id: 5
+    desc: "B/L number: CDF == Bill of Lading"
+    fields:
+      - {item: 14, ref: customs_declaration.f14_bl_no}
+      - {item: 41, ref: bill_of_lading.f41_bl_no}
+
+  - id: 6
+    desc: >
+      Mode of transport: CDF == Bill of Lading. Verified by hand: the CDF
+      stores the modality CODE ("水路运输" = water transport), the B/L
+      stores vessel+voyage+port ("HAPPY LUCKY/510S YANTIAN") -- they will
+      never match as text even if both are read correctly. Not verifiable
+      by exact equality.
+    verifiable: false
+    fields:
+      - {item: 15, ref: customs_declaration.f15_transport_mode}
+      - {item: 42, ref: bill_of_lading.f42_means_transport}
+
+  - id: 7
+    desc: >
+      Container number(s): CDF == Bill of Lading == Cargo Manifest ==
+      Shipping Order == Delivery Note (cross-check across 5 documents;
+      verified by hand against samples/, MRKU0030781 and MRKU0885679
+      match across the 4 documents that currently have an extractor)
+    fields:
+      - {item: 16, ref: customs_declaration.f16_container_nos}
+      - {item: 43, ref: bill_of_lading.f43_container_nos}
+      - {item: 45, ref: cargo_manifest_detail.f45_container_nos}
+      - {item: 58, ref: shipping_order.f58_container_no}
+      - {item: 65, ref: null, note: "Delivery Note (3.7.4.4) -- sin sample ni doc_type todavia"}
+
+  - id: 8
+    desc: "Contract number (SO): CDF == VAT invoice"
+    fields:
+      - {item: 17, ref: customs_declaration.f17_contract_no}
+      - {item: 22, ref: export_invoice.f22_contract_no}
+
+  - id: 9
+    desc: >
+      Net weight (CDF, kilograms) == quantity (VAT invoice, tons). Same
+      data, different units -- verified by hand: 51000 kg == 51 t in the
+      sample. Converted to a common unit (kg) before comparing, see
+      'unit' on each leg.
+    fields:
+      - {item: 18, ref: customs_declaration.f18_net_weight, unit: kg}
+      - {item: 27, ref: export_invoice.f27_quantity, unit: ton}
+
+  - id: 10
+    desc: "Gross weight: CDF == Bill of Lading"
+    fields:
+      - {item: 19, ref: customs_declaration.f19_gross_weight}
+      - {item: 44, ref: bill_of_lading.f44_gross_weight}
+
+  - id: 11
+    desc: "USD amount: CDF == Refund Tool == VAT invoice (3-way cross-check)"
+    fields:
+      - {item: 20, ref: "customs_declaration.f20_price_block.total_price"}
+      - {item: 8, ref: null, note: "Data Source / Refund Tool -- sin sample identificado"}
+      - {item: 23, ref: export_invoice.f23_amount_usd}
+
+  - id: 12
+    desc: "CNY amount: VAT invoice == Refund Tool"
+    fields:
+      - {item: 24, ref: export_invoice.f24_amount_cny}
+      - {item: 9, ref: null, note: "Data Source / Refund Tool -- sin sample identificado"}
+
+  - id: 13
+    desc: >
+      CDF number on the VAT invoice == CDF number from the Refund Tool ==
+      own CDF number (restates rule 1, adds the invoice field that also
+      stores it). Same precision caveat as rule 1 for the Refund Tool field.
+    fields:
+      - {item: 28, ref: export_invoice.f28_cdf_no}
+      - {item: 1, ref: tax_filing_directory.cdf_no_ref,
+         note: "precision perdida (float64) -- no comparar digito a digito sin normalizar"}
+      - {item: 11, ref: customs_declaration.f11_customs_no}
+
+  - id: 14
+    desc: >
+      SO number: customs_declaration/export_invoice/sales_contract ==
+      tax_filing_directory. Not one of the 13 "Validation" rows in
+      rules.xlsx (the Data Source group doesn't include SO in its items
+      1-10) -- added anyway because in practice it's the key that links a
+      Filing Directory record to the rest of a shipment's documents, and
+      it DOES match exactly in the sample (13194443, no precision loss).
+    fields:
+      - {item: 17, ref: customs_declaration.f17_contract_no}
+      - {item: 22, ref: export_invoice.f22_contract_no}
+      - {item: 33, ref: sales_contract.f33_contract_no}
+      - {item: null, ref: tax_filing_directory.so_no_ref,
+         note: "clave de correlacion, no un item numerado en rules.xlsx"}

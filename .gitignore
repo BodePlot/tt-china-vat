@@ -1,0 +1,8 @@
+/venv
+/fields
+/output
+/samples
+*.xlsx
+/.claude
+/.vscode
+/__pycache__
