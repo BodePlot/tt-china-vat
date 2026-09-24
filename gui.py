@@ -176,6 +176,19 @@ def flatten_reconciliation(shipments):
     return rows
 
 
+def _truncate(text, n):
+    """Recorta texto para que Description/Detail no se coman todo el ancho
+    de la tabla -- el Treeview no hace wrap de multilinea, asi que la unica
+    forma de acortar la celda es cortando el texto (el valor completo se ve
+    abajo, en -RECON_DETAIL-, al hacer click)."""
+    text = str(text)
+    return text if len(text) <= n else text[:n - 1] + "…"
+
+
+def _truncate_recon_row(row):
+    return [row[0], row[1], _truncate(row[2], 40), row[3], _truncate(row[4], 70)]
+
+
 # =============================================================================
 # Preview del documento
 # =============================================================================
@@ -260,9 +273,10 @@ def tab_process():
          sg.Push(), sg.Text("0%", key="-PCT-", text_color=C["muted"])],
         [sg.ProgressBar(100, "h", size=(55, 18), key="-BAR-", expand_x=True)],
         [sg.Text("Log", font=("Segoe UI", 11, "bold"))],
-        [sg.Multiline(size=(100, 18), key="-LOG-", autoscroll=True, disabled=True,
+        [sg.Multiline(size=(100, 13), key="-LOG-", autoscroll=True, disabled=True,
                       expand_x=True, expand_y=True, background_color="#111827",
-                      text_color="#E5E7EB", font=("Consolas", 9))],
+                      text_color="#E5E7EB", font=("Consolas", 9),
+                      pad=(0, (3, 20)))],
     ]
 
 
@@ -291,10 +305,10 @@ def tab_results():
                   headings=["File", "Pg", "Document type", "Field",
                             "Value", "Conf", "Status"],
                   col_widths=[26, 4, 22, 20, 34, 6, 16],
-                  auto_size_columns=False, justification="left", num_rows=20,
+                  auto_size_columns=False, justification="left", num_rows=12,
                   alternating_row_color="#F8FAFC",
                   selected_row_colors=(C["text"], C["sel"]),
-                  expand_x=True, expand_y=True)],
+                  expand_x=True, expand_y=True, pad=(0, (3, 24)))],
     ]
 
 
@@ -304,8 +318,8 @@ def tab_review():
          sg.Text("0", key="-REV_N-", text_color="#FFFFFF",
                  background_color=C["warn"], font=("Segoe UI", 10, "bold"),
                  pad=(8, 4))],
-        [sg.Listbox([], size=(40, 24), key="-REV_LIST-", enable_events=True,
-                    expand_x=True, expand_y=True)],
+        [sg.Listbox([], size=(40, 18), key="-REV_LIST-", enable_events=True,
+                    expand_x=True, expand_y=True, pad=(0, (3, 20)))],
     ], expand_x=True, expand_y=True)
 
     right = sg.Column([
@@ -329,11 +343,13 @@ def tab_review():
         [sg.Text("Value read (edit to correct)",
                  font=("Segoe UI", 10, "bold"))],
         [sg.Multiline(key="-REV_VALUE-", size=(70, 4), expand_x=True)],
-        [sg.Push(),
-         sg.Button("Not legible", key="-REV_SKIP-", disabled=True, size=(14, 2),
-                   button_color=(C["text"], "#E5E7EB")),
-         sg.Button("Save correction", key="-REV_SAVE-", disabled=True,
-                   size=(20, 2), font=("Segoe UI", 10, "bold"))],
+        [sg.Column([[
+            sg.Push(),
+            sg.Button("Not legible", key="-REV_SKIP-", disabled=True, size=(14, 2),
+                      button_color=(C["text"], "#E5E7EB")),
+            sg.Button("Save correction", key="-REV_SAVE-", disabled=True,
+                      size=(20, 2), font=("Segoe UI", 10, "bold"))]],
+                  expand_x=True, pad=(0, (8, 20)))],
     ], expand_x=True, expand_y=True)
 
     return [[left, sg.VerticalSeparator(), right]]
@@ -363,8 +379,9 @@ def tab_reconciliation():
                   key="-RECON_VERDICT-", enable_events=True, size=(18, 1))],
         [sg.Column([[sg.Table(values=[], key="-RECON_TABLE-",
                   headings=["Shipment", "Rule", "Description", "Verdict", "Detail"],
-                  col_widths=[14, 6, 42, 14, 140],
-                  auto_size_columns=False, justification="left", num_rows=22,
+                  col_widths=[14, 6, 40, 14, 70],
+                  auto_size_columns=False, justification="left", num_rows=16,
+                  font=("Segoe UI", 10), header_font=("Segoe UI", 10, "bold"),
                   alternating_row_color="#F8FAFC",
                   selected_row_colors=(C["text"], C["sel"]),
                   # el scroll horizontal lo da el Column de afuera (ver
@@ -386,10 +403,15 @@ def tab_reconciliation():
                   # un Column de 1260px). scrollable=True sí cablea un
                   # scrollbar funcional al contenido interno.
                   scrollable=True, vertical_scroll_only=False,
-                  size=(1260, 460), expand_x=True, expand_y=True, pad=(0, 0))],
-        [sg.Text("Click a cell to copy it.", text_color=C["muted"]),
+                  size=(1260, 340), expand_x=True, expand_y=True,
+                  pad=(0, (0, 24)))],
+        [sg.Text("Click a row to see its full Description/Detail below "
+                 "(the clicked cell is also copied).",
+                 text_color=C["muted"]),
          sg.Push(),
          sg.Text("", key="-RECON_COPIED-", text_color=C["ok"])],
+        [sg.Multiline("", key="-RECON_DETAIL-", size=(140, 5), disabled=True,
+                      expand_x=True, font=("Segoe UI", 11), pad=(0, (3, 20)))],
     ]
 
 
@@ -417,22 +439,25 @@ def main():
     store = ReviewStore(CORRECTIONS)
 
     layout = [
-        [sg.Column([[sg.Text("China VAT Refund", font=("Segoe UI", 20, "bold"),
+        [sg.Column([[sg.Text("China VAT Refund", font=("Segoe UI", 17, "bold"),
                              background_color=C["surface"])],
                     [sg.Text("Extraction, review and reconciliation of "
                              "export documents",
-                             font=("Segoe UI", 10), text_color=C["muted"],
+                             font=("Segoe UI", 9), text_color=C["muted"],
                              background_color=C["surface"])]],
-                   background_color=C["surface"], expand_x=True, pad=(20, 12))],
+                   background_color=C["surface"], expand_x=True, pad=(20, 8))],
         [sg.HorizontalSeparator()],
         [sg.TabGroup([[sg.Tab("Process", tab_process()),
                        sg.Tab("Results", tab_results()),
                        sg.Tab("Review", tab_review()),
                        sg.Tab("Reconciliation", tab_reconciliation())]],
                      expand_x=True, expand_y=True, pad=(14, 12))],
+        [sg.HorizontalSeparator(pad=(0, (10, 0)))],
+        [sg.Push(), sg.Button("Exit", key="-EXIT-", size=(9, 1),
+                              font=("Segoe UI", 10, "bold"), pad=(20, (16, 20)))],
     ]
 
-    win = sg.Window("China VAT Refund", layout, size=(1320, 850),
+    win = sg.Window("China VAT Refund", layout, size=(1320, 900),
                     resizable=True, finalize=True, margins=(0, 0))
 
     # el Column que envuelve -RECON_TABLE- trae su propio par vsb/hsb (ver
@@ -503,7 +528,8 @@ def main():
                                  "DISCREPANCY": ("#FEF2F2", "#991B1B"),
                                  "NOT_VERIFIABLE": ("#FFEDD5", "#C2410C"),
                                  }[r[3]])) for i, r in enumerate(shown)]
-        win["-RECON_TABLE-"].update(values=shown, row_colors=colors)
+        win["-RECON_TABLE-"].update(values=[_truncate_recon_row(r) for r in shown],
+                                    row_colors=colors)
         # sin esto el Column con scrollable=True no se entera de que el
         # contenido cambió y el hsb queda con el rango de la carga anterior
         win["-RECON_TABLE-"].ParentContainer.contents_changed()
@@ -527,7 +553,7 @@ def main():
 
     while True:
         ev, val = win.read(timeout=120)
-        if ev == sg.WIN_CLOSED:
+        if ev in (sg.WIN_CLOSED, "-EXIT-"):
             break
 
         # --- cola del worker
@@ -606,6 +632,12 @@ def main():
                 sg.clipboard_set(value)
                 shown_value = value if len(value) <= 60 else value[:57] + "…"
                 win["-RECON_COPIED-"].update(f"Copied: {shown_value}")
+                # el panel de abajo muestra la fila entera, no solo la celda
+                # clickeada -- asi no hace falta acertarle a la columna exacta
+                # (Description o Detail) para leer el texto completo
+                full_row = recon_shown[row]
+                win["-RECON_DETAIL-"].update(
+                    f"Description: {full_row[2]}\n\nDetail: {full_row[4]}")
 
         elif ev == "-REV_LIST-" and val["-REV_LIST-"]:
             idx = win["-REV_LIST-"].get_indexes()
