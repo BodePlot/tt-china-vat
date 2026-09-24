@@ -1,0 +1,83 @@
+# =============================================================================
+# Checklist de documentacion por embarque: que documentos tiene que tener el
+# legajo de cada exportacion. La lista sale de los bloques de columnas de
+# rules.xlsx (fila 1, "3.2 Export Customs Declaration Form", "3.3 Export VAT
+# Invoice", ...) -- mismo numero que el prefijo de los archivos en samples/.
+#
+# 'doc_types' son los tipos de rules.yaml que cuentan como ese documento.
+# Vacio = todavia no hay extractor para ese documento: la herramienta NO
+# puede saber si esta o no, y lo muestra como "revisar a mano" en vez de
+# darlo por faltante (seria una acusacion sin evidencia).
+#
+# PENDIENTE confirmar con el equipo de impuestos cuales son obligatorios
+# para dar el legajo por completo. Hasta entonces todos cuentan igual.
+# =============================================================================
+
+documents:
+
+  - code: "3.1"
+    name: "Export Tax Refund Filing Directory"
+    # en rules.xlsx es el bloque "Data Source" (Refund record from Tax
+    # Bureau); el archivo que lo cubre hoy es el registro 3.1 -- ver la nota
+    # de reconciliation.yaml sobre que columnas le faltan
+    doc_types: [tax_filing_directory]
+
+  - code: "3.2"
+    name: "Export Customs Declaration Form"
+    doc_types: [customs_declaration]
+
+  - code: "3.3"
+    name: "Export VAT Invoice"
+    doc_types: [export_invoice]
+
+  - code: "3.4"
+    name: "Bank Receipt for Export Proceeds Collection"
+    doc_types: []
+
+  - code: "3.5"
+    name: "Sales and Purchase Contract"
+    doc_types: [sales_contract]
+
+  - code: "3.6"
+    name: "Details of Customs Clearance Related Expenses"
+    doc_types: []
+
+  - code: "3.7.1"
+    name: "Bill of Lading"
+    doc_types: [bill_of_lading]
+
+  - code: "3.7.2"
+    name: "Cargo Manifest"
+    doc_types: [cargo_manifest, cargo_manifest_detail]
+
+  - code: "3.7.4.1"
+    name: "Domestic Transportation Invoice"
+    doc_types: []
+
+  - code: "3.7.4.2"
+    name: "Reconciliation Statement - Domestic Transportation (LSR)"
+    doc_types: []
+
+  - code: "3.7.4.3"
+    name: "Shipping Order"
+    doc_types: [shipping_order]
+
+  - code: "3.7.4.4"
+    name: "Delivery Note"
+    doc_types: []
+
+  - code: "3.7.5.1"
+    name: "Coordination & Management Fee Invoice"
+    doc_types: []
+
+  - code: "3.7.5.2"
+    name: "Reconciliation Statement - Coordination & Management Fees (LSR)"
+    doc_types: []
+
+  - code: "3.8.2.1"
+    name: "Customs Declaration Fee Invoice - Yili Guangzhou"
+    doc_types: []
+
+  - code: "3.8.2.2"
+    name: "Reconciliation Statement - Customs Declaration Fees - Yili Guangzhou (LSR)"
+    doc_types: []

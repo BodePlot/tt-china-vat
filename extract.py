@@ -645,7 +645,9 @@ def corroborate(items, field, spec):
 def process_xlsx(path, rules):
     """
     Contraparte de process_pdf() para fuentes tipo log (ej. Shipping Order):
-    no hay OCR ni paginas, la hoja completa se clasifica y extrae de una.
+    no hay OCR ni paginas, la hoja completa se clasifica de una. Si el tipo
+    tiene per_row (rules.yaml), se extrae un record por fila de datos; si
+    no, un unico record para toda la hoja.
     Sin cache: leer un xlsx no cuesta nada comparado con OCR.
     """
     wb = openpyxl.load_workbook(path, data_only=True, read_only=True)
@@ -653,16 +655,40 @@ def process_xlsx(path, rules):
     wb.close()
 
     cls = classify(items, rules["doc_types"])
-    rec = {"page": 1, "source": "xlsx", "render_scale": 1.0,
+    cfg = rules["doc_types"][cls["type"]] if cls["type"] else {}
+    header_row = _xlsx_header_row(items, cfg) if cfg.get("per_row") else None
+    if header_row is None:
+        return {"file": Path(path).name, "pages": [_xlsx_record(items, 1, cls, cfg)]}
+
+    # per_row: un log con registros de muchos embarques -> un record por
+    # fila. Cada fila ve los headers (para que xlsx_col encuentre su
+    # columna) y solo su propia fila de datos. 'page' es el numero de fila
+    # de Excel: identifica el registro igual que una pagina en un PDF.
+    header = [it for it in items if it["y"] <= header_row]
+    data_rows = sorted({it["y"] for it in items if it["y"] > header_row})
+    pages = [_xlsx_record(header + [it for it in items if it["y"] == r], r, cls, cfg)
+             for r in data_rows]
+    return {"file": Path(path).name, "pages": pages}
+
+
+def _xlsx_header_row(items, cfg):
+    """Fila de headers = la mas baja donde aparece algun header de xlsx_col."""
+    rows = [lab["y"] for spec in cfg.get("fields", {}).values()
+            if spec.get("strategy") == "xlsx_col"
+            for lab in [_find_label(items, spec["header"])] if lab]
+    return max(rows) if rows else None
+
+
+def _xlsx_record(items, row, cls, cfg):
+    rec = {"page": row, "source": "xlsx", "render_scale": 1.0,
            "triage": {"skip": False, "median_box_h": None, "n_boxes": len(items)},
            "classification": cls, "fields": {}}
-    if cls["type"]:
-        for fname, spec in rules["doc_types"][cls["type"]]["fields"].items():
-            f = resolve_field(items, spec)
-            f = corroborate(items, f, spec)
-            f["desc_zh"] = spec.get("desc_zh", "")
-            rec["fields"][fname] = f
-    return {"file": Path(path).name, "pages": [rec]}
+    for fname, spec in cfg.get("fields", {}).items():
+        f = resolve_field(items, spec)
+        f = corroborate(items, f, spec)
+        f["desc_zh"] = spec.get("desc_zh", "")
+        rec["fields"][fname] = f
+    return rec
 
 
 def process_pdf(path, rules):

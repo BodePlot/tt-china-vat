@@ -42,20 +42,19 @@ JOIN_KEYS = [
     ("sales_contract", "f33_contract_no", "so"),
     ("cargo_manifest", "f46_contract_no", "so"),
     ("tax_filing_directory", "so_no_ref", "so"),
+    ("shipping_order", "so_no_ref", "so"),
     ("customs_declaration", "f16_container_nos", "container"),
     ("bill_of_lading", "f43_container_nos", "container"),
     ("cargo_manifest_detail", "f45_container_nos", "container"),
     ("shipping_order", "f58_container_no", "container"),
 ]
 
-# shipping_order es un LOG de despacho (una fila = un camion de UN embarque
-# cualquiera), no un documento por embarque. Al día de hoy process_xlsx()
-# junta todos los contenedores de TODAS las filas en un solo record -- si
-# algun dia se procesan varios embarques juntos, ese record va a terminar
-# uniendose a cada cluster que comparta algun contenedor con el log, en vez
-# de particionarse por fila. No es un problema con un solo embarque en la
-# carpeta (el caso de hoy), pero hay que resolverlo (leer fila por fila) si
-# se van a procesar lotes con mas de un embarque a la vez.
+# shipping_order y tax_filing_directory son LOGS (per_row en rules.yaml):
+# un solo archivo con filas de muchos embarques. process_xlsx() ya los
+# entrega como un record por fila, asi que cada fila se une solo al
+# embarque de su SO/contenedor. Las filas de embarques que no tienen
+# ningun otro documento en la carpeta quedan en grupos propios, que run()
+# descarta (ver _only_logs()).
 
 
 def load_rules(path=None):
@@ -66,6 +65,11 @@ def load_rules(path=None):
 def load_doc_types(path=None):
     path = Path(path) if path else HERE / "rules.yaml"
     return yaml.safe_load(open(path, encoding="utf-8"))["doc_types"]
+
+
+def load_checklist(path=None):
+    path = Path(path) if path else HERE / "checklist.yaml"
+    return yaml.safe_load(open(path, encoding="utf-8"))["documents"]
 
 
 # --- Normalizacion de valores -------------------------------------------------
@@ -130,10 +134,17 @@ def build_records(results):
 def cluster_records(records):
     """
     Agrupa records que comparten un valor de SO o de contenedor (union-find).
-    Un record sin ninguna clave de correlacion queda solo en su propio grupo.
+
+    Un record SIN ninguna clave (ej. el aviso de liberacion de la pag. 1 del
+    CDF, el packing list dentro del contrato) sigue al resto de su archivo:
+    si las paginas con clave de ese archivo cayeron todas en un mismo grupo,
+    es de ese embarque. Si cayeron en grupos distintos (un log per_row con
+    filas de muchos embarques) no hay forma de saber cual, y queda solo --
+    run() lo reporta como "sin asignar".
     """
     dsu = _DSU()
     first_holder = {}     # valor normalizado -> indice del primer record que lo tuvo
+    keyed = set()
 
     for idx, rec in enumerate(records):
         for doc_type, field, _kind in JOIN_KEYS:
@@ -144,10 +155,19 @@ def cluster_records(records):
                 key = _normalize_id(v)
                 if not key:
                     continue
+                keyed.add(idx)
                 if key in first_holder:
                     dsu.union(idx, first_holder[key])
                 else:
                     first_holder[key] = idx
+
+    roots_by_file = {}
+    for idx in keyed:
+        roots_by_file.setdefault(records[idx]["file"], set()).add(dsu.find(idx))
+    for idx, rec in enumerate(records):
+        roots = roots_by_file.get(rec["file"], set())
+        if idx not in keyed and len(roots) == 1:
+            dsu.union(idx, next(iter(roots)))
 
     groups = {}
     for idx in range(len(records)):
@@ -205,13 +225,16 @@ def _resolver_pata(cluster, doc_types, item):
     doc_type, field = item["ref"].split(".")[0], item["ref"].split(".")[1]
     sub = item["ref"].split(".")[2] if item["ref"].count(".") > 1 else None
 
-    rec = next((r for r in cluster if r["doc_type"] == doc_type
-               and field in r["fields"]), None)
-    if rec is None:
+    recs = [r for r in cluster if r["doc_type"] == doc_type and field in r["fields"]]
+    if not recs:
         return {"status": "MISSING", "value": None, "item": item.get("item"),
                 "ref": item["ref"], "note": "documento no presente en este embarque"}
 
-    f = rec["fields"][field]
+    f = recs[0]["fields"][field]
+    if len(recs) > 1 and _field_spec(doc_types, item["ref"])[0].get("multi"):
+        # varias filas de un log per_row (ej. un camion por contenedor en
+        # shipping_order): la lista del embarque es la union de todas
+        f = _merge_list_fields([r["fields"][field] for r in recs])
     val = f["value"]
     if sub:
         # una correccion manual (Revision tab) guarda lo que el analista
@@ -234,6 +257,17 @@ def _resolver_pata(cluster, doc_types, item):
     if item.get("note") and "precision perdida" in item["note"]:
         return {**base, "status": "LOSSY", "value": val, "note": item["note"]}
     return {**base, "status": "OK", "value": val}
+
+
+def _merge_list_fields(fields):
+    """Une los valores de lista; el campo resultante es tan confiable como
+    el peor de los que lo forman."""
+    found = [f for f in fields if f["value"] is not None]
+    if not found:
+        return fields[0]
+    values = list(dict.fromkeys(v for f in found for v in _as_list(f["value"])))
+    worst = min(found, key=lambda f: f["conf"])
+    return {**worst, "value": values}
 
 
 # --- Comparacion ---------------------------------------------------------------
@@ -315,22 +349,101 @@ def _verdict(legs):
     return "VERIFIED" if _agree(ok_legs) else "DISCREPANCY"
 
 
-def run(results, rules=None, doc_types=None):
+def _only_logs(cluster, doc_types):
+    """
+    True si todo el grupo son filas de logs per_row (shipping_order,
+    tax_filing_directory): esos logs traen embarques que no son de esta
+    carpeta, y dos filas del mismo SO no hacen un embarque a reconciliar.
+    """
+    return all(doc_types.get(rec["doc_type"], {}).get("per_row") for rec in cluster)
+
+
+def _key_values(rec, kind=None):
+    """Valores de clave de correlacion (SO/contenedor) que trae un record."""
+    out = []
+    for doc_type, field, k in JOIN_KEYS:
+        if rec["doc_type"] != doc_type or (kind and k != kind):
+            continue
+        raw = rec["fields"].get(field, {}).get("value")
+        out += [key for key in map(_normalize_id, _as_list(raw)) if key]
+    return out
+
+
+# --- Checklist de documentacion -----------------------------------------------
+PRESENT, MISSING, MANUAL = "PRESENT", "MISSING", "MANUAL"
+
+
+def evaluate_checklist(cluster, documents):
+    """
+    Un renglon por documento de checklist.yaml:
+      PRESENT -> hay al menos una pagina/fila de alguno de sus doc_types
+      MISSING -> tiene extractor y no aparece en el embarque
+      MANUAL  -> sin extractor: no se puede afirmar ni que esta ni que falta
+    """
+    out = []
+    for d in documents:
+        types = d.get("doc_types") or []
+        hits = [{"file": rec["file"], "page": rec["page"]}
+                for rec in cluster if rec["doc_type"] in types]
+        status = MANUAL if not types else (PRESENT if hits else MISSING)
+        out.append({"code": d["code"], "name": d["name"], "status": status,
+                    "sources": hits})
+    return out
+
+
+def _warnings(cluster, checklist):
+    """Senales de que el grupo puede estar mal armado (union-find es
+    transitivo: una sola clave mal leida pega dos embarques)."""
+    out = []
+    sos = sorted({v for rec in cluster for v in _key_values(rec, "so")})
+    if len(sos) > 1:
+        out.append(f"mixes {len(sos)} different SOs ({', '.join(sos)}) -- "
+                   "check that these documents belong to the same shipment")
+    for item in checklist:
+        files = sorted({s["file"] for s in item["sources"]})
+        if len(files) > 1:
+            out.append(f"{item['code']} {item['name']} comes from "
+                       f"{len(files)} different files: {', '.join(files)}")
+    return out
+
+
+def run(results, rules=None, doc_types=None, documents=None):
+    """
+    Devuelve {"shipments": [...], "unassigned": [...]}:
+      shipments  -> un embarque por grupo con alguna clave (SO/contenedor):
+                    reglas evaluadas, checklist de documentos y avisos
+      unassigned -> paginas sin ninguna clave que tampoco se pudieron
+                    atar al embarque de su archivo (ver cluster_records)
+    """
     rules = rules if rules is not None else load_rules()
     doc_types = doc_types if doc_types is not None else load_doc_types()
+    documents = documents if documents is not None else load_checklist()
 
     records = build_records(results)
     clusters = cluster_records(records)
 
-    out = []
+    shipments, unassigned = [], []
     for cluster in clusters:
-        doc_summary = sorted({rec["doc_type"] for rec in cluster})
-        if len(doc_summary) < 2:
-            continue          # un solo documento no tiene nada contra que cruzar
-        out.append({"shipment": _cluster_label(cluster), "doc_types": doc_summary,
-                    "files": sorted({rec["file"] for rec in cluster}),
-                    "rules": [evaluate_rule(cluster, r, doc_types) for r in rules]})
-    return out
+        if not any(_key_values(rec) for rec in cluster):
+            unassigned += [{"file": rec["file"], "page": rec["page"],
+                            "doc_type": rec["doc_type"]} for rec in cluster]
+            continue
+        if _only_logs(cluster, doc_types):
+            continue          # embarque que solo figura en los logs, sin docs en la carpeta
+        # un embarque con un solo documento se reporta igual: sus reglas
+        # salen NOT_VERIFIABLE y el checklist muestra lo que falta, que es
+        # justamente lo que hay que saber de el
+        checklist = evaluate_checklist(cluster, documents)
+        shipments.append({
+            "shipment": _cluster_label(cluster),
+            "doc_types": sorted({rec["doc_type"] for rec in cluster}),
+            "files": sorted({rec["file"] for rec in cluster}),
+            "rules": [evaluate_rule(cluster, r, doc_types) for r in rules],
+            "checklist": checklist,
+            "warnings": _warnings(cluster, checklist),
+        })
+    shipments.sort(key=lambda s: s["shipment"])
+    return {"shipments": shipments, "unassigned": unassigned}
 
 
 if __name__ == "__main__":
@@ -344,14 +457,21 @@ if __name__ == "__main__":
     results = extract.process_folder(target, rules_yaml)
     out = run(results)
 
-    for shipment in out:
+    for shipment in out["shipments"]:
         print(f"\n{'=' * 78}\nEmbarque: {shipment['shipment']}  "
               f"(docs: {', '.join(shipment['doc_types'])})")
+        for w in shipment["warnings"]:
+            print(f"  ! {w}")
+        for item in shipment["checklist"]:
+            src = ", ".join(f"{s['file']} p{s['page']}" for s in item["sources"])
+            print(f"  [{item['status']:7}] {item['code']:8} {item['name'][:45]:45} {src}")
         for r in shipment["rules"]:
             print(f"  [{r['verdict']:14}] regla {r['id']:2}: {r['desc'][:70]}")
             for leg in r["legs"]:
                 print(f"      item {leg.get('item')!s:>4} {leg['status']:9} "
                       f"{leg.get('ref') or '(sin extractor)':40} = {leg['value']!r}")
+    for u in out["unassigned"]:
+        print(f"\nSin asignar: {u['file']} p{u['page']} ({u['doc_type']})")
 
     dest = HERE / "output" / "reconciliation.json"
     dest.parent.mkdir(exist_ok=True)

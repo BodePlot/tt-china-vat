@@ -471,13 +471,21 @@ doc_types:
   #
   # De sus 7 columnas (item code 57-63 en rules.xlsx), SOLO Container No.
   # (item 58) aparece en un cruce real (regla 7, contra CDF/BOL/Cargo
-  # Manifest/Delivery Note -- ver reconciliation.yaml). El resto (SO,
-  # fecha de transporte, patente, peso neto, origen, destino) no participa
-  # en ninguna regla del machete, asi que no se agregan todavia.
+  # Manifest/Delivery Note -- ver reconciliation.yaml). El resto (fecha de
+  # transporte, patente, peso neto, origen, destino) no participa en
+  # ninguna regla del machete, asi que no se agregan todavia. La SO SI se
+  # extrae (so_no_ref), pero no para una regla: es la clave que ata cada
+  # fila a su embarque (ver JOIN_KEYS en reconciliation.py).
+  #
+  # per_row: el log trae camiones de MUCHOS embarques (un solo archivo para
+  # toda la carpeta), asi que cada fila se procesa como un documento propio
+  # -- si no, el log entero seria un solo record con los contenedores de
+  # todos los embarques y terminaria uniendolos en un unico grupo.
   shipping_order:
     label_es: "Orden de embarque (log de despacho interno)"
     label_zh: "运单"
     source_ext: xlsx
+    per_row: true
 
     signature:
       required:
@@ -496,6 +504,11 @@ doc_types:
         regex: '[A-Z]{4}\d{7}'
         multi: true
         unique: true
+
+      so_no_ref:
+        desc_zh: "SAP订单号"                    # (SAP order no. = SO del contrato)
+        strategy: xlsx_col
+        header: "SAP订单号"
 
   # ---------------------------------------------------------------------------
   # 3.1 Export Tax Refund Filing Directory.xlsx -- registro de archivo, una
@@ -516,6 +529,7 @@ doc_types:
     label_es: "Registro de archivo de reintegro de IVA a la exportacion"
     label_zh: "出口退税备案目录"
     source_ext: xlsx
+    per_row: true                # una fila por exportacion (ver shipping_order)
 
     signature:
       required:

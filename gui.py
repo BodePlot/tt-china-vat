@@ -1,12 +1,13 @@
 """
 China VAT Refund - Workspace de extraccion y reconciliacion.
 
-Correr:  python src/gui.py
+Correr:  python gui.py
 """
 
 import io
 import queue
 import threading
+import tkinter.font
 import traceback
 from pathlib import Path
 
@@ -20,7 +21,7 @@ import reconciliation
 from review_store import ReviewStore
 
 HERE = Path(__file__).resolve().parent
-ROOT = HERE.parent
+ROOT = HERE          # el proyecto es plano: samples/ y output/ viven al lado de gui.py
 DEFAULT_SAMPLES = ROOT / "samples"
 CORRECTIONS = ROOT / "output" / "corrections.json"
 
@@ -176,17 +177,95 @@ def flatten_reconciliation(shipments):
     return rows
 
 
-def _truncate(text, n):
-    """Recorta texto para que Description/Detail no se coman todo el ancho
-    de la tabla -- el Treeview no hace wrap de multilinea, asi que la unica
-    forma de acortar la celda es cortando el texto (el valor completo se ve
-    abajo, en -RECON_DETAIL-, al hacer click)."""
+RECON_COL_WIDTHS = [14, 6, 40, 14, 84]
+RECON_FONT = ("Segoe UI", 10)
+
+
+def _truncate(text, px, font):
+    """Recorta texto para que entre en una celda de 'px' pixeles -- el
+    Treeview no hace wrap ni pone '…' solo, asi que la unica forma de
+    acortar la celda es cortando el texto (el valor completo se ve abajo,
+    en -RECON_DETAIL-, al hacer click). Se mide en pixeles y no en
+    caracteres: con una fuente proporcional, contar caracteres desperdicia
+    un tercio de la celda en texto normal (minusculas) o se pasa en texto
+    ancho (mayusculas, numeros)."""
     text = str(text)
-    return text if len(text) <= n else text[:n - 1] + "…"
+    if font.measure(text) <= px:
+        return text
+    lo, hi = 0, len(text)
+    while lo < hi:                    # el prefijo mas largo que entra con '…'
+        mid = (lo + hi + 1) // 2
+        if font.measure(text[:mid] + "…") <= px:
+            lo = mid
+        else:
+            hi = mid - 1
+    return text[:lo].rstrip() + "…"
+
+
+def _fit_row(row, widths, cols):
+    """Recorta las columnas 'cols' de una fila al ancho de su celda."""
+    font = tkinter.font.Font(font=RECON_FONT)
+    # mismo ancho que le da FreeSimpleGUI a la columna (col_width * ancho
+    # de 'A' + 10), menos el padding interno de la celda
+    cell = lambda i: widths[i] * font.measure("A") + 10 - 12
+    return [_truncate(v, cell(i), font) if i in cols else v
+            for i, v in enumerate(row)]
 
 
 def _truncate_recon_row(row):
-    return [row[0], row[1], _truncate(row[2], 40), row[3], _truncate(row[4], 70)]
+    return _fit_row(row, RECON_COL_WIDTHS, (2, 4))
+
+
+# --- Checklist ------------------------------------------------------------------
+CHK_SUMMARY_WIDTHS = [16, 10, 10, 12, 110]
+CHK_DETAIL_WIDTHS = [9, 60, 12, 77]
+CHK_COLORS = {"PRESENT": ("#F0FDF4", "#166534"),       # (fondo, texto)
+              "MISSING": ("#FEF2F2", "#991B1B"),
+              "MANUAL": ("#FFEDD5", "#C2410C"),
+              "UNASSIGNED": ("#FEF2F2", "#991B1B")}
+UNASSIGNED = "(unassigned)"
+
+
+def _sources_text(sources):
+    """[{file, page}] -> '3.7.4.3 Shipping Order.xlsx (rows 3, 4)'. En un
+    xlsx 'page' es el numero de fila (ver extract.process_xlsx)."""
+    by_file = {}
+    for s in sources:
+        by_file.setdefault(s["file"], []).append(s["page"])
+    parts = []
+    for f, pages in by_file.items():
+        unit = ("row" if len(pages) == 1 else "rows") if f.lower().endswith(".xlsx") else "p."
+        parts.append(f"{f} ({unit} {', '.join(map(str, sorted(pages)))})")
+    return "   |   ".join(parts)
+
+
+def flatten_checklist(recon):
+    """
+    Salida de reconciliation.run() -> (resumen, detalle):
+      resumen  -> una fila por embarque para -CHK_SUMMARY-
+      detalle  -> {embarque: (filas para -CHK_TABLE-, avisos)}
+    Las paginas sin asignar van como un "embarque" mas, al final.
+    """
+    summary, detail = [], {}
+    for s in recon["shipments"]:
+        n = {st: sum(1 for i in s["checklist"] if i["status"] == st)
+             for st in ("PRESENT", "MISSING", "MANUAL")}
+        warn = s["warnings"]
+        summary.append([s["shipment"], n["PRESENT"], n["MISSING"], n["MANUAL"],
+                        f"{len(warn)}: {warn[0]}" if warn else ""])
+        detail[s["shipment"]] = ([[i["code"], i["name"], i["status"],
+                                   _sources_text(i["sources"])]
+                                  for i in s["checklist"]], warn)
+    if recon["unassigned"]:
+        u = recon["unassigned"]
+        summary.append([UNASSIGNED, "", "", "",
+                        f"{len(u)} page(s) with no SO or container number"])
+        detail[UNASSIGNED] = ([["", DOC_LABELS.get(p["doc_type"], p["doc_type"]),
+                                "UNASSIGNED", _sources_text([p])] for p in u],
+                              ["These pages have no SO or container number and "
+                               "the rest of their file doesn't point to a single "
+                               "shipment — assign them by hand."])
+    return summary, detail
 
 
 # =============================================================================
@@ -377,34 +456,19 @@ def tab_reconciliation():
          sg.Combo(["All", "VERIFIED", "DISCREPANCY", "NOT_VERIFIABLE"],
                   default_value="All", readonly=True,
                   key="-RECON_VERDICT-", enable_events=True, size=(18, 1))],
-        [sg.Column([[sg.Table(values=[], key="-RECON_TABLE-",
+        # sin scroll horizontal: Description/Detail ya vienen recortadas al
+        # ancho de su columna (ver _truncate_recon_row), asi que la tabla
+        # entra entera en la ventana y no hay nada que desplazar.
+        [sg.Table(values=[], key="-RECON_TABLE-",
                   headings=["Shipment", "Rule", "Description", "Verdict", "Detail"],
-                  col_widths=[14, 6, 40, 14, 70],
-                  auto_size_columns=False, justification="left", num_rows=16,
-                  font=("Segoe UI", 10), header_font=("Segoe UI", 10, "bold"),
+                  col_widths=RECON_COL_WIDTHS,
+                  auto_size_columns=False, justification="left", num_rows=22,
+                  font=RECON_FONT, header_font=("Segoe UI", 10, "bold"),
                   alternating_row_color="#F8FAFC",
                   selected_row_colors=(C["text"], C["sel"]),
-                  # el scroll horizontal lo da el Column de afuera (ver
-                  # nota abajo) -- la tabla NO crea su propio hsb. El
-                  # vertical lo sigue manejando la tabla (su propio vsb):
-                  # el alto del Treeview queda fijo en num_rows filas sin
-                  # importar cuanto mida el Column que lo envuelve, asi que
-                  # si se lo oculta las filas de mas quedan inalcanzables
-                  # (probado aparte). El vsb del Column se oculta a mano
-                  # despues de Finalize para no tener dos barras verticales.
                   vertical_scroll_only=True, hide_vertical_scroll=False,
                   enable_click_events=True,
-                  expand_x=False, expand_y=False)]],
-                  # Un Column con size= (SIN scrollable=True) solo recorta
-                  # visualmente -- el contenido que sobra queda oculto y
-                  # sin ninguna barra conectada para alcanzarlo (probado
-                  # aparte: el hsb de la tabla quedaba en (0.0, 1.0), como si
-                  # nada sobrara, aunque el Treeview media 1946px dentro de
-                  # un Column de 1260px). scrollable=True sí cablea un
-                  # scrollbar funcional al contenido interno.
-                  scrollable=True, vertical_scroll_only=False,
-                  size=(1260, 340), expand_x=True, expand_y=True,
-                  pad=(0, (0, 24)))],
+                  expand_x=False, expand_y=False, pad=(0, (0, 24)))],
         [sg.Text("Click a row to see its full Description/Detail below "
                  "(the clicked cell is also copied).",
                  text_color=C["muted"]),
@@ -412,6 +476,43 @@ def tab_reconciliation():
          sg.Text("", key="-RECON_COPIED-", text_color=C["ok"])],
         [sg.Multiline("", key="-RECON_DETAIL-", size=(140, 5), disabled=True,
                       expand_x=True, font=("Segoe UI", 11), pad=(0, (3, 20)))],
+    ]
+
+
+def tab_checklist():
+    table_opts = dict(auto_size_columns=False, justification="left",
+                      font=RECON_FONT, header_font=("Segoe UI", 10, "bold"),
+                      alternating_row_color="#F8FAFC",
+                      selected_row_colors=(C["text"], C["sel"]),
+                      vertical_scroll_only=True, hide_vertical_scroll=False,
+                      expand_x=False, expand_y=False)
+    return [
+        [sg.Text("Documentation checklist per shipment",
+                 font=("Segoe UI", 14, "bold"), pad=(0, (20, 4))),
+         sg.Push(),
+         sg.Text("0", key="-CHK_INCOMPLETE-", text_color="#FFFFFF",
+                 background_color=C["bad"], font=("Segoe UI", 10, "bold"),
+                 pad=(8, 4)),
+         sg.Text("shipments with missing documents", text_color=C["muted"])],
+        [sg.Text("   PRESENT — found in the folder", text_color=C["ok"]),
+         sg.Text("   MISSING — not found in the folder", text_color=C["bad"]),
+         sg.Text("   MANUAL — no automatic detection for this document yet, "
+                 "check it by hand", text_color=C["warn"])],
+        [sg.Table(values=[], key="-CHK_SUMMARY-",
+                  headings=["Shipment", "Present", "Missing", "Manual check",
+                            "Warnings"],
+                  col_widths=CHK_SUMMARY_WIDTHS, num_rows=8,
+                  enable_events=True, select_mode=sg.TABLE_SELECT_MODE_BROWSE,
+                  pad=(0, (6, 14)), **table_opts)],
+        [sg.Text("Select a shipment above.", key="-CHK_TITLE-",
+                 font=("Segoe UI", 11, "bold"))],
+        [sg.Table(values=[], key="-CHK_TABLE-",
+                  headings=["Code", "Document", "Status", "Found in"],
+                  col_widths=CHK_DETAIL_WIDTHS, num_rows=16,
+                  pad=(0, (3, 10)), **table_opts)],
+        [sg.Multiline("", key="-CHK_WARN-", size=(140, 4), disabled=True,
+                      expand_x=True, font=("Segoe UI", 10),
+                      text_color=C["bad"], pad=(0, (0, 20)))],
     ]
 
 
@@ -436,6 +537,7 @@ def run_extraction(folder, rules, out_q):
 def main():
     rules = yaml.safe_load(open(HERE / "rules.yaml", encoding="utf-8"))
     recon_rules = reconciliation.load_rules(HERE / "reconciliation.yaml")
+    checklist_docs = reconciliation.load_checklist(HERE / "checklist.yaml")
     store = ReviewStore(CORRECTIONS)
 
     layout = [
@@ -450,6 +552,7 @@ def main():
         [sg.TabGroup([[sg.Tab("Process", tab_process()),
                        sg.Tab("Results", tab_results()),
                        sg.Tab("Review", tab_review()),
+                       sg.Tab("Checklist", tab_checklist()),
                        sg.Tab("Reconciliation", tab_reconciliation())]],
                      expand_x=True, expand_y=True, pad=(14, 12))],
         [sg.HorizontalSeparator(pad=(0, (10, 0)))],
@@ -460,14 +563,9 @@ def main():
     win = sg.Window("China VAT Refund", layout, size=(1320, 900),
                     resizable=True, finalize=True, margins=(0, 0))
 
-    # el Column que envuelve -RECON_TABLE- trae su propio par vsb/hsb (ver
-    # tab_reconciliation) -- nos quedamos solo con su hsb, el vertical ya
-    # lo resuelve la tabla con el suyo. Sin esto quedan dos barras
-    # verticales una al lado de la otra.
-    win["-RECON_TABLE-"].ParentContainer.vsb.pack_forget()
-
     results, rows, cases, out_q, worker = [], [], [], queue.Queue(), None
     recon_shipments, recon_rows, recon_shown = [], [], []
+    chk_summary, chk_detail = [], {}
 
     def log(msg):
         win["-LOG-"].print(msg)
@@ -530,11 +628,34 @@ def main():
                                  }[r[3]])) for i, r in enumerate(shown)]
         win["-RECON_TABLE-"].update(values=[_truncate_recon_row(r) for r in shown],
                                     row_colors=colors)
-        # sin esto el Column con scrollable=True no se entera de que el
-        # contenido cambió y el hsb queda con el rango de la carga anterior
-        win["-RECON_TABLE-"].ParentContainer.contents_changed()
         n_disc = sum(1 for r in recon_rows if r[3] == "DISCREPANCY")
         win["-RECON_DISCREPANCIA-"].update(n_disc)
+
+    def refresh_checklist_summary():
+        # un embarque "esta bien" si no le falta nada detectable y no tiene
+        # avisos; los MANUAL no cuentan en contra (no hay evidencia)
+        colors = []
+        for i, r in enumerate(chk_summary):
+            bad = r[0] == UNASSIGNED or r[2] or r[4]
+            bg, fg = CHK_COLORS["MISSING" if bad else "PRESENT"]
+            colors.append((i, fg, bg))              # (fila, texto, fondo)
+        win["-CHK_SUMMARY-"].update(
+            values=[_fit_row(r, CHK_SUMMARY_WIDTHS, (4,)) for r in chk_summary],
+            row_colors=colors)
+        win["-CHK_INCOMPLETE-"].update(
+            sum(1 for r in chk_summary if r[0] != UNASSIGNED and r[2]))
+
+    def show_checklist(shipment):
+        items, warnings = chk_detail.get(shipment, ([], []))
+        title = ("Pages not assigned to any shipment" if shipment == UNASSIGNED
+                 else f"Documents of shipment {shipment}")
+        win["-CHK_TITLE-"].update(title)
+        win["-CHK_TABLE-"].update(
+            values=[_fit_row(r, CHK_DETAIL_WIDTHS, (1, 3)) for r in items],
+            row_colors=[(i, CHK_COLORS[r[2]][1], CHK_COLORS[r[2]][0])
+                        for i, r in enumerate(items)])
+        win["-CHK_WARN-"].update("\n".join(f"⚠ {w}" for w in warnings)
+                                 or "No warnings.")
 
     def show_case(c):
         win["-REV_EMPTY-"].update(visible=False)
@@ -581,14 +702,20 @@ def main():
                     log(f"Reapplied {n} saved corrections.")
                 rows = flatten(results)
                 cases = build_review_cases(results)
-                recon_shipments = reconciliation.run(results, recon_rules,
-                                                     rules["doc_types"])
+                recon = reconciliation.run(results, recon_rules,
+                                           rules["doc_types"], checklist_docs)
+                recon_shipments = recon["shipments"]
                 recon_rows = flatten_reconciliation(recon_shipments)
+                chk_summary, chk_detail = flatten_checklist(recon)
+                refresh_checklist_summary()
+                if chk_summary:
+                    win["-CHK_SUMMARY-"].update(select_rows=[0])
+                    show_checklist(chk_summary[0][0])
                 refresh_table()
                 refresh_review()
                 refresh_counters()
                 win["-RECON_FILTER-"].update(
-                    values=["All"] + sorted({r[0] for r in recon_rows}))
+                    values=["All"] + sorted({r[0] for r in recon_rows}), value="All")
                 refresh_reconciliation()
                 win["-PROCESS-"].update(disabled=False, text="Process")
                 win["-EXPORT-"].update(disabled=not rows)
@@ -623,6 +750,9 @@ def main():
 
         elif ev in ("-RECON_FILTER-", "-RECON_VERDICT-"):
             refresh_reconciliation()
+
+        elif ev == "-CHK_SUMMARY-" and val["-CHK_SUMMARY-"]:
+            show_checklist(chk_summary[val["-CHK_SUMMARY-"][0]][0])
 
         elif isinstance(ev, tuple) and ev[0] == "-RECON_TABLE-":
             _, _, (row, col) = ev
