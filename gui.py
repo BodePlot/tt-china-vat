@@ -124,6 +124,7 @@ DOC_LABELS = {
     "customs_declaration": "Customs Declaration (3.2)",
     "export_invoice": "Export Invoice (3.3)",
     "tax_filing_directory": "Refund Filing Directory (3.1)",
+    "refund_record": "Refund Record (Tax Bureau)",
     "bill_of_lading": "Bill of Lading (3.7.1)",
     "cargo_manifest": "Cargo Manifest (3.7.2)",
     "cargo_manifest_detail": "Cargo Manifest (3.7.2)",
@@ -748,6 +749,13 @@ def main():
                 win["-TOTAL_TIME-"].update(elapsed)
                 t_start = None
                 log(f"Done. Total time: {elapsed}")
+                # problemas de la carpeta entera (ej. dos 3.1): una sola vez,
+                # bien visible, en vez de repetirlo en cada exportacion
+                for w in recon["folder_warnings"]:
+                    log(f"WARNING: {w}")
+                if recon["folder_warnings"]:
+                    sg.popup_ok("\n\n".join(recon["folder_warnings"]),
+                                title="Check the folder")
             elif kind == "error":
                 log(payload)
                 win["-PROCESS-"].update(disabled=False, text="Process")
@@ -763,6 +771,20 @@ def main():
             if not any(p.suffix.lower() in extract.PROCESSORS
                       for p in folder.rglob("*")):
                 sg.popup_error("No PDFs or xlsx files in:", str(folder))
+                continue
+            # el 3.1 y el refund record son el ancla del periodo: con dos no
+            # se puede saber cual vale, asi que no se procesa (ver rules.yaml)
+            dups = extract.duplicate_single_files(folder, rules)
+            if dups:
+                sg.popup_error(
+                    "This folder has more than one file of a type that must be "
+                    "unique. Keep only one of each and process again:\n\n"
+                    + "\n\n".join(
+                        next((f"{d['code']} {d['name']}" for d in checklist_docs
+                              if dt in (d.get("doc_types") or [])), dt)
+                        + ":\n  " + "\n  ".join(files)
+                        for dt, files in dups.items()),
+                    title="Duplicate files")
                 continue
             win["-LOG-"].update("")
             win["-PROCESS-"].update(disabled=True, text="Processing…")

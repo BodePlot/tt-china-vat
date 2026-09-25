@@ -15,11 +15,14 @@
 
 documents:
 
+  - code: "DS"
+    name: "Refund record from Tax Bureau (Data Source)"
+    # bloque "Data Source" de rules.xlsx, sin numero 3.x: es lo reclamado al
+    # fisco, el punto de partida del equipo (ver rules.yaml, refund_record)
+    doc_types: [refund_record]
+
   - code: "3.1"
     name: "Export Tax Refund Filing Directory"
-    # en rules.xlsx es el bloque "Data Source" (Refund record from Tax
-    # Bureau); el archivo que lo cubre hoy es el registro 3.1 -- ver la nota
-    # de reconciliation.yaml sobre que columnas le faltan
     doc_types: [tax_filing_directory]
 
   - code: "3.2"

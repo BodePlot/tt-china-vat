@@ -511,6 +511,94 @@ doc_types:
         header: "SAP订单号"
 
   # ---------------------------------------------------------------------------
+  # Refund record from TAX BUREAU -- el export del sistema del fisco con una
+  # fila por exportacion reclamada. Es el bloque "Data Source" de rules.xlsx
+  # (items 1-10) y la tabla china de ese archivo (filas 5-14) es su formato:
+  # el equipo la llamo su "starting point". Sin numero 3.x. Distinto del 3.1
+  # (ese lo arma la empresa y no trae montos).
+  #
+  # El sample actual es SINTETICO: la tabla de rules.xlsx tal cual (9 filas
+  # reales de 2026, sin documentos en samples/ -> prueban "reclamada sin
+  # documentos") + 5 filas armadas con los datos de nuestras exportaciones.
+  # Una celda de factura puede traer varias separadas por ';' -- se toma la
+  # primera (en los datos reales se repite la misma).
+  refund_record:
+    label_es: "Registro de reintegros del fisco (Data Source)"
+    label_zh: "出口退税申报记录"
+    source_ext: xlsx
+    per_row: true
+    single_file: true            # ancla del periodo: un solo archivo por carpeta
+
+    signature:
+      required:
+        - "出口货物报关单号"
+        - "退税额CNY"
+      optional:
+        - "征税率"
+        - "退税率"
+        - "出口金额USD"
+      negative: []
+
+    fields:
+      cdf_no:
+        desc_zh: "出口货物报关单号"              # (CDF number)
+        strategy: xlsx_col
+        header: "出口货物报关单号"
+        regex: '\d{18}'
+
+      vat_invoice_no:
+        desc_zh: "出口发票号"                    # (VAT invoice number)
+        strategy: xlsx_col
+        header: "出口发票号"
+        regex: '\d{20}'
+
+      refund_period:
+        desc_zh: "退税所属期"
+        strategy: xlsx_col
+        header: "退税所属期"
+
+      export_date:
+        desc_zh: "出口日期"
+        strategy: xlsx_col
+        header: "出口日期"
+
+      vat_rate:
+        desc_zh: "征税率"
+        strategy: xlsx_col
+        header: "征税率"
+        type: number
+
+      refund_rate:
+        desc_zh: "退税率"
+        strategy: xlsx_col
+        header: "退税率"
+        type: number
+
+      quantity_kg:
+        desc_zh: "出口数量KG"
+        strategy: xlsx_col
+        header: "出口数量KG"
+        type: number
+
+      amount_usd:
+        desc_zh: "出口金额USD"
+        strategy: xlsx_col
+        header: "出口金额USD"
+        type: number
+
+      amount_cny:
+        desc_zh: "出口金额CNY"
+        strategy: xlsx_col
+        header: "出口金额CNY"
+        type: number
+
+      vat_refunded:
+        desc_zh: "退税额CNY"
+        strategy: xlsx_col
+        header: "退税额CNY"
+        type: number
+
+  # ---------------------------------------------------------------------------
   # 3.1 Export Tax Refund Filing Directory.xlsx -- registro de archivo, una
   # fila por exportacion. NO es el mismo tab "Data Source" que arma rules.xlsx
   # (a ese le faltan tasa de IVA, tasa de reintegro, cantidad y montos), pero
@@ -530,6 +618,10 @@ doc_types:
     label_zh: "出口退税备案目录"
     source_ext: xlsx
     per_row: true                # una fila por exportacion (ver shipping_order)
+    # single_file: es la lista maestra del periodo -- dos archivos en la misma
+    # carpeta (una copia, una version vieja) dejan la duda de cual vale, asi
+    # que se avisa UNA vez por corrida (reconciliation.folder_warnings)
+    single_file: true
 
     signature:
       required:

@@ -823,6 +823,32 @@ def process_pdf(path, rules):
 PROCESSORS = {".pdf": process_pdf, ".xlsx": process_xlsx}
 
 
+def duplicate_single_files(folder, rules):
+    """
+    {doc_type: [archivos]} para los tipos single_file (rules.yaml) que
+    aparecen en MAS de un archivo de la carpeta. Se corre ANTES de procesar:
+    esos tipos son xlsx, clasificarlos es instantaneo, y si hay duplicados
+    no tiene sentido pagar el OCR de los PDFs para despues no poder decidir
+    cual de los dos vale.
+    """
+    folder = Path(folder)
+    single = {dt for dt, cfg in rules["doc_types"].items() if cfg.get("single_file")}
+    found = {}
+    for p in sorted(folder.rglob("*.xlsx")):
+        if p.name.startswith("~$"):
+            continue
+        try:
+            wb = openpyxl.load_workbook(p, data_only=True, read_only=True)
+            items = sheet_items(wb.active)
+            wb.close()
+        except Exception:
+            continue                          # un xlsx roto lo reporta process_folder
+        dt = classify(items, rules["doc_types"])["type"]
+        if dt in single:
+            found.setdefault(dt, []).append(str(p.relative_to(folder)))
+    return {dt: files for dt, files in found.items() if len(files) > 1}
+
+
 def process_folder(folder, rules, on_progress=None):
     """
     Procesa todos los PDFs y xlsx de la carpeta, incluidas subcarpetas

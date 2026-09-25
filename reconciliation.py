@@ -47,7 +47,18 @@ JOIN_KEYS = [
     ("bill_of_lading", "f43_container_nos", "container"),
     ("cargo_manifest_detail", "f45_container_nos", "container"),
     ("shipping_order", "f58_container_no", "container"),
+    # el refund record del fisco NO trae SO ni contenedor: se ata por N° de
+    # CDF, que tambien esta en el propio CDF, en la factura (renglon de
+    # notas) y en el 3.1
+    ("refund_record", "cdf_no", "cdf"),
+    ("customs_declaration", "f11_customs_no", "cdf"),
+    ("export_invoice", "f28_cdf_no", "cdf"),
+    ("tax_filing_directory", "cdf_no_ref", "cdf"),
 ]
+
+# el "starting point" del equipo: lo que esta en este registro es lo que se
+# reclamo al fisco (ver rules.yaml)
+CLAIM_DOC_TYPE = "refund_record"
 
 # shipping_order y tax_filing_directory son LOGS (per_row en rules.yaml):
 # un solo archivo con filas de muchos embarques. process_xlsx() ya los
@@ -185,6 +196,10 @@ def _cluster_label(cluster):
             v = _normalize_id(v)
             if v:
                 return v
+    # sin SO (ej. una exportacion que solo esta en el refund record): el CDF
+    cdfs = sorted({v for rec in cluster for v in _key_values(rec, "cdf")})
+    if cdfs:
+        return f"CDF {cdfs[0]}"
     return " + ".join(sorted({rec["file"] for rec in cluster}))
 
 
@@ -358,6 +373,10 @@ def _only_logs(cluster, doc_types):
     return all(doc_types.get(rec["doc_type"], {}).get("per_row") for rec in cluster)
 
 
+def _claimed(cluster):
+    return any(rec["doc_type"] == CLAIM_DOC_TYPE for rec in cluster)
+
+
 def _key_values(rec, kind=None):
     """Valores de clave de correlacion (SO/contenedor) que trae un record."""
     out = []
@@ -387,19 +406,47 @@ def evaluate_checklist(cluster, documents):
                 for rec in cluster if rec["doc_type"] in types]
         status = MANUAL if not types else (PRESENT if hits else MISSING)
         out.append({"code": d["code"], "name": d["name"], "status": status,
-                    "sources": hits})
+                    "sources": hits, "doc_types": types})
     return out
 
 
-def _warnings(cluster, checklist):
-    """Senales de que el grupo puede estar mal armado (union-find es
-    transitivo: una sola clave mal leida pega dos embarques)."""
+def folder_warnings(records, doc_types, documents=()):
+    """
+    Avisos de la carpeta entera (no de un embarque): mas de un archivo de
+    un tipo single_file. Se avisa una vez aca en vez de repetirlo en cada
+    embarque -- el problema es de la carpeta, no de cada exportacion.
+    """
     out = []
+    for dt, cfg in doc_types.items():
+        if not cfg.get("single_file"):
+            continue
+        files = sorted({r["file"] for r in records if r["doc_type"] == dt})
+        if len(files) > 1:
+            name = next((f"{d['code']} {d['name']}" for d in documents
+                         if dt in (d.get("doc_types") or [])), dt)
+            out.append(f"{len(files)} files of type '{name}' in the folder "
+                       f"({', '.join(files)}) -- keep only one: when they "
+                       "disagree, the first one read is the one used")
+    return out
+
+
+def _warnings(cluster, checklist, doc_types, claims_loaded):
+    """Senales de que el grupo puede estar mal armado (union-find es
+    transitivo: una sola clave mal leida pega dos embarques), o de que no
+    cierra contra lo reclamado al fisco."""
+    out = []
+    if _only_logs(cluster, doc_types) and _claimed(cluster):
+        out.append("claimed in the refund record but NO documents found in the folder")
+    elif claims_loaded and not _claimed(cluster):
+        out.append("has documents but is NOT in the refund record (not claimed?)")
     sos = sorted({v for rec in cluster for v in _key_values(rec, "so")})
     if len(sos) > 1:
         out.append(f"mixes {len(sos)} different SOs ({', '.join(sos)}) -- "
                    "check that these documents belong to the same shipment")
+    single = {dt for dt, cfg in doc_types.items() if cfg.get("single_file")}
     for item in checklist:
+        if set(item.get("doc_types", [])) & single:
+            continue              # ya lo cubre folder_warnings(), una sola vez
         files = sorted({s["file"] for s in item["sources"]})
         if len(files) > 1:
             out.append(f"{item['code']} {item['name']} comes from "
@@ -409,11 +456,12 @@ def _warnings(cluster, checklist):
 
 def run(results, rules=None, doc_types=None, documents=None):
     """
-    Devuelve {"shipments": [...], "unassigned": [...]}:
-      shipments  -> un embarque por grupo con alguna clave (SO/contenedor):
-                    reglas evaluadas, checklist de documentos y avisos
-      unassigned -> paginas sin ninguna clave que tampoco se pudieron
-                    atar al embarque de su archivo (ver cluster_records)
+    Devuelve {"shipments": [...], "unassigned": [...], "folder_warnings": [...]}:
+      shipments       -> un embarque por grupo con alguna clave (SO/contenedor/
+                         CDF): reglas evaluadas, checklist de documentos y avisos
+      unassigned      -> paginas sin ninguna clave que tampoco se pudieron
+                         atar al embarque de su archivo (ver cluster_records)
+      folder_warnings -> problemas de la carpeta entera (ver folder_warnings)
     """
     rules = rules if rules is not None else load_rules()
     doc_types = doc_types if doc_types is not None else load_doc_types()
@@ -421,6 +469,9 @@ def run(results, rules=None, doc_types=None, documents=None):
 
     records = build_records(results)
     clusters = cluster_records(records)
+    # "no esta reclamado" solo tiene sentido si el refund record esta en la
+    # carpeta; sin el, todas las exportaciones darian ese aviso
+    claims_loaded = any(rec["doc_type"] == CLAIM_DOC_TYPE for rec in records)
 
     shipments, unassigned = [], []
     for cluster in clusters:
@@ -428,8 +479,10 @@ def run(results, rules=None, doc_types=None, documents=None):
             unassigned += [{"file": rec["file"], "page": rec["page"],
                             "doc_type": rec["doc_type"]} for rec in cluster]
             continue
-        if _only_logs(cluster, doc_types):
+        if _only_logs(cluster, doc_types) and not _claimed(cluster):
             continue          # embarque que solo figura en los logs, sin docs en la carpeta
+        # si esta en el refund record, se reporta AUNQUE no tenga documentos:
+        # "se reclamo el reintegro y no hay legajo" es lo mas grave de todo
         # un embarque con un solo documento se reporta igual: sus reglas
         # salen NOT_VERIFIABLE y el checklist muestra lo que falta, que es
         # justamente lo que hay que saber de el
@@ -444,10 +497,11 @@ def run(results, rules=None, doc_types=None, documents=None):
                          "doc_type": rec["doc_type"]} for rec in cluster],
             "rules": [evaluate_rule(cluster, r, doc_types) for r in rules],
             "checklist": checklist,
-            "warnings": _warnings(cluster, checklist),
+            "warnings": _warnings(cluster, checklist, doc_types, claims_loaded),
         })
     shipments.sort(key=lambda s: s["shipment"])
-    return {"shipments": shipments, "unassigned": unassigned}
+    return {"shipments": shipments, "unassigned": unassigned,
+            "folder_warnings": folder_warnings(records, doc_types, documents)}
 
 
 if __name__ == "__main__":
@@ -458,6 +512,10 @@ if __name__ == "__main__":
 
     target = Path(sys.argv[1]) if len(sys.argv) > 1 else HERE / "samples"
     rules_yaml = yaml.safe_load(open(HERE / "rules.yaml", encoding="utf-8"))
+    dups = extract.duplicate_single_files(target, rules_yaml)
+    if dups:
+        sys.exit("Archivos duplicados de un tipo que tiene que ser unico -- dejar uno solo:\n"
+                 + "\n".join(f"  {dt}: {', '.join(files)}" for dt, files in dups.items()))
     results = extract.process_folder(target, rules_yaml)
     out = run(results)
 
@@ -474,6 +532,8 @@ if __name__ == "__main__":
             for leg in r["legs"]:
                 print(f"      item {leg.get('item')!s:>4} {leg['status']:9} "
                       f"{leg.get('ref') or '(sin extractor)':40} = {leg['value']!r}")
+    for w in out["folder_warnings"]:
+        print(f"\n!! {w}")
     for u in out["unassigned"]:
         print(f"\nSin asignar: {u['file']} p{u['page']} ({u['doc_type']})")
 

@@ -106,7 +106,8 @@ def _field_rows(records, pages_by_key):
     return rows
 
 
-def write_report(path, shipment, source_folder, pages_by_key, log_files):
+def write_report(path, shipment, source_folder, pages_by_key, log_files,
+                 folder_warnings=()):
     ck = shipment["checklist"]
     count = lambda items, key, val: sum(1 for i in items if i[key] == val)
     wb = Workbook()
@@ -121,6 +122,7 @@ def write_report(path, shipment, source_folder, pages_by_key, log_files):
         ["Rules with discrepancy", count(shipment["rules"], "verdict", "DISCREPANCY")],
         ["Rules not verifiable", count(shipment["rules"], "verdict", "NOT_VERIFIABLE")],
         ["Warnings", "\n".join(shipment["warnings"]) or "none"],
+        ["Folder warnings", "\n".join(folder_warnings) or "none"],
         ["Shared logs (not copied)",
          "\n".join(log_files) + "\nTheir rows for this shipment are in 'Extracted data'."
          if log_files else "none"],
@@ -173,7 +175,8 @@ def export_by_shipment(results, recon, doc_types, source_folder, dest_root=None)
         logs = sorted({r["file"] for r in s["records"] if is_log(r["doc_type"])})
         copy(own, d / "documents")
         write_report(d / f"{_safe_name(s['shipment'])}_report.xlsx", s,
-                     source_folder, pages_by_key, logs)
+                     source_folder, pages_by_key, logs,
+                     recon.get("folder_warnings", ()))
 
     if recon["unassigned"]:
         d = run_dir / UNASSIGNED_DIR
@@ -196,6 +199,10 @@ if __name__ == "__main__":
 
     folder = Path(sys.argv[1]) if len(sys.argv) > 1 else HERE / "samples"
     rules_yaml = yaml.safe_load(open(HERE / "rules.yaml", encoding="utf-8"))
+    dups = extract.duplicate_single_files(folder, rules_yaml)
+    if dups:
+        sys.exit("Archivos duplicados de un tipo que tiene que ser unico -- dejar uno solo:\n"
+                 + "\n".join(f"  {dt}: {', '.join(files)}" for dt, files in dups.items()))
     results = extract.process_folder(folder, rules_yaml)
     recon = reconciliation.run(results, doc_types=rules_yaml["doc_types"])
     out = export_by_shipment(results, recon, rules_yaml["doc_types"], folder)

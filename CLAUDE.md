@@ -53,6 +53,10 @@ Siempre con `venv/Scripts/python.exe`. `samples/`, `output/` y `*.xlsx` están e
 5. **Checklist**: PRESENT / MISSING (tiene extractor y no está) / MANUAL (sin extractor: no se afirma nada).
    Avisos: "mixes N different SOs" y "same document from N different files". El union-find es transitivo, así que
    un contenedor mal leído puede pegar dos exportaciones.
+6. **Un solo archivo ancla por carpeta**: los tipos con `single_file: true` (el 3.1 y el refund record) no pueden
+   estar duplicados. `extract.duplicate_single_files()` los busca ANTES de procesar (son xlsx: es instantáneo) y la
+   GUI y la CLI **no procesan** si hay más de uno: piden dejar uno solo. `reconciliation.folder_warnings()` queda
+   como respaldo si se llama a `run()` directo. Pendiente consultar con el equipo si están de acuerdo con la regla.
 
 ## OCR y rendimiento (CPU only: la PC corporativa no tiene GPU)
 
@@ -79,15 +83,18 @@ Siempre con `venv/Scripts/python.exe`. `samples/`, `output/` y `*.xlsx` están e
   13194294.pdf`. La factura trae el N° de CDF mal tipeado (…517 en vez de …511) → regla 13 DISCREPANCY, y USD 49680
   en vez de 46920 → la regla 11 da NOT_VERIFIABLE, no DISCREPANCY (ver Trampas: montos contra un CDF escaneado).
 - `3.1 Export Tax Refund Filing Directory.xlsx`: filas 1-5, una por exportación.
+- `Refund record from TAX BUREAU.xlsx` (**sintético**, doc_type `refund_record`): la tabla china de rules.xlsx tal
+  cual (9 filas reales de 2026, sin documentos → prueban "claimed but NO documents") + 5 filas nuestras. En la 5
+  trae el USD correcto (46920), así la factura errónea (49680) da DISCREPANCY en la regla 11.
 - `3.7.4.3 Shipping Order.xlsx`: log de camiones de muchas exportaciones (una fila = un contenedor).
-- Resultado esperado para las 4: 7 docs PRESENT, 9 MANUAL, 10 reglas VERIFIED, 4 NOT_VERIFIABLE (3, 4 y 6 por
-  diseño; la 12 por falta de fuente), 0 discrepancias.
+- Resultado esperado: exportaciones 1-4 → 11 VERIFIED, 3 NOT_VERIFIABLE (3, 4 y 6, por diseño), 0 discrepancias.
+  Exportación 5 → DISCREPANCY en las reglas 11 y 13. Más 9 "exportaciones" `CDF 5304…`: reclamadas sin documentos.
 
 ## Trampas conocidas
 
-- **Montos y pesos nunca dan DISCREPANCY hoy**: se cruzan contra el CDF escaneado, que sale LOW_CONF, y una pata
-  dudosa no acusa. Una diferencia real queda como NOT_VERIFIABLE. Se arregla con el Refund Tool (fuente confiable
-  de montos) o mejorando la confianza del CDF. Ver "Próximos pasos".
+- **Montos contra el CDF escaneado no acusan**: el CDF sale LOW_CONF y una pata dudosa no acusa. Las reglas 11 y 12
+  sí pueden dar DISCREPANCY gracias al refund record (Excel, confiable). Las 9 y 10 (pesos: CDF vs factura/B/L)
+  todavía no. Ver "Próximos pasos".
 - Escaneos de costado: si los campos con posición salen vacíos pero los `page_regex` funcionan, sospechar rotación.
 - `tax_filing_directory`: CDF y factura podrían venir como float en Excel, con precisión perdida → marcados LOSSY.
 - FreeSimpleGUI `row_colors` = `(fila, texto, fondo)`, no `(fila, fondo, texto)`.
@@ -99,7 +106,8 @@ Siempre con `venv/Scripts/python.exe`. `samples/`, `output/` y `*.xlsx` están e
 
 ## Próximos pasos (propuestos, sin implementar)
 
-Objetivo: que un error real de monto o peso (ej. la exportación 5, regla 11) no quede escondido como NOT_VERIFIABLE.
+Objetivo: que un error real de peso (reglas 9 y 10) no quede escondido como NOT_VERIFIABLE. Los montos (11 y 12) ya
+se resolvieron con el refund record.
 En este orden:
 
 1. **Estado `CHECK`** en `reconciliation.py`: las patas no coinciden, pero alguna es LOW_CONF. Sigue sin acusar,
@@ -107,14 +115,13 @@ En este orden:
 2. **Subir la confianza del CDF con aritmética**: si el bloque de precio trae cantidad × precio unitario = total
    (sin verificar), que las tres cifras cierren confirma la lectura del OCR. Así las reglas 9, 10 y 11 pueden dar
    DISCREPANCY de verdad.
-3. **Refund record sintético** sin esperar el real: resuelve la regla 12, le da a la 11 una fuente confiable
-   (Excel, sin OCR) y arranca el pendiente #1. Cuando llegue el real, se ajustan las columnas.
+3. ~~Refund record sintético~~: hecho (ver Samples).
 
 ## Pendientes / preguntas al equipo
 
-1. **Refund record (la tabla china) como punto de partida**: nuevo doc_type `per_row`, el CDF como JOIN_KEY, alertas
-   "reclamada sin documentos" y "documentos sin reclamo", y las reglas 1, 2, 11 y 12 contra esa fuente. Hace falta un
-   export real (o armar uno sintético). No tiene número 3.x.
+1. **Refund record: IMPLEMENTADO con un sample sintético** (doc_type `refund_record`, el CDF como JOIN_KEY, alertas
+   "claimed but NO documents" / "NOT in the refund record", reglas 1, 2, 11, 12 y 13). Falta un export real para
+   confirmar el formato (fila del encabezado, tipos de dato) y preguntar por las filas con montos en 0.
 2. ¿Qué documentos son obligatorios para un legajo completo? (todos cuentan igual por ahora)
 3. ¿Los ~70 ítems sin regla son solo para registrar, o se cruzan? (ej. LSR No. factura ↔ estado de cuenta, SO)
 4. Equivalencias para las reglas 3 y 6; qué quieren cruzar realmente en la 4. Tolerancias de pesos y montos.

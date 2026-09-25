@@ -14,20 +14,11 @@
 #
 # El grupo "Data Source" / Refund Tool de rules.xlsx (items 1-10: numero de
 # CDF, numero de factura VAT, tasa de IVA, tasa de reintegro, cantidad,
-# montos USD/CNY, reintegro) no tiene un archivo que matchee esas columnas
-# exactas entre los samples. SI existe samples/3.1 Export Tax Refund Filing
-# Directory.xlsx (doc_type tax_filing_directory), que comparte numero de CDF
-# y numero de factura VAT con ese grupo -- se usa para los items 1 y 2 en
-# las reglas 1, 2 y 13. Le faltan tasa de IVA/reintegro/cantidad/montos, asi
-# que las reglas 11 y 12 (que necesitan Amount USD/CNY del Refund Tool)
-# siguen sin fuente.
-#
-# OJO: cdf_no_ref y vat_invoice_no_ref en tax_filing_directory vienen con
-# perdida de precision (ver nota en rules.yaml) -- un cruce EXACTO de
-# digitos contra estos dos campos especificamente va a fallar aunque el
-# resto de la cadena este bien. so_no_ref (el numero de SO) no tiene ese
-# problema y matchea exacto contra customs_declaration/export_invoice en
-# el sample (13194443).
+# montos USD/CNY, reintegro) sale del doc_type refund_record: el export del
+# fisco con el formato de la tabla china de rules.xlsx. Antes se usaba el
+# 3.1 (tax_filing_directory) como sustituto para los items 1 y 2, pero no
+# trae montos y lo arma la empresa, no el fisco. El 3.1 queda en la regla 14.
+# El sample de refund_record es SINTETICO (ver rules.yaml).
 #
 # IMPORTANTE: de los 84 items que rules.xlsx define, solo estos 13 renglones
 # de la fila "Validation" tienen algo cargado. Todo lo demas (items 30-40,
@@ -42,23 +33,18 @@ rules:
 
   - id: 1
     desc: >
-      Customs declaration number (CDF) == CDF number from the Refund Tool.
-      The available source (tax_filing_directory.cdf_no_ref) has precision
-      loss -- see the data quality note above, this cross-check can give a
-      false negative even if the CDF is correct.
+      Customs declaration number (CDF) == CDF number from the Refund Tool
+      (the Tax Bureau refund record).
     fields:
       - {item: 11, ref: customs_declaration.f11_customs_no}
-      - {item: 1, ref: tax_filing_directory.cdf_no_ref,
-         note: "precision perdida (float64) -- no comparar digito a digito sin normalizar"}
+      - {item: 1, ref: refund_record.cdf_no}
 
   - id: 2
     desc: >
-      VAT invoice number == VAT invoice number from the Refund Tool. Same
-      precision caveat as rule 1.
+      VAT invoice number == VAT invoice number from the Refund Tool.
     fields:
       - {item: 21, ref: export_invoice.f21_invoice_no}
-      - {item: 2, ref: tax_filing_directory.vat_invoice_no_ref,
-         note: "precision perdida (float64) -- no comparar digito a digito sin normalizar"}
+      - {item: 2, ref: refund_record.vat_invoice_no}
 
   - id: 3
     desc: >
@@ -141,24 +127,23 @@ rules:
     desc: "USD amount: CDF == Refund Tool == VAT invoice (3-way cross-check)"
     fields:
       - {item: 20, ref: "customs_declaration.f20_price_block.total_price"}
-      - {item: 8, ref: null, note: "Data Source / Refund Tool -- sin sample identificado"}
+      - {item: 8, ref: refund_record.amount_usd}
       - {item: 23, ref: export_invoice.f23_amount_usd}
 
   - id: 12
     desc: "CNY amount: VAT invoice == Refund Tool"
     fields:
       - {item: 24, ref: export_invoice.f24_amount_cny}
-      - {item: 9, ref: null, note: "Data Source / Refund Tool -- sin sample identificado"}
+      - {item: 9, ref: refund_record.amount_cny}
 
   - id: 13
     desc: >
       CDF number on the VAT invoice == CDF number from the Refund Tool ==
       own CDF number (restates rule 1, adds the invoice field that also
-      stores it). Same precision caveat as rule 1 for the Refund Tool field.
+      stores it).
     fields:
       - {item: 28, ref: export_invoice.f28_cdf_no}
-      - {item: 1, ref: tax_filing_directory.cdf_no_ref,
-         note: "precision perdida (float64) -- no comparar digito a digito sin normalizar"}
+      - {item: 1, ref: refund_record.cdf_no}
       - {item: 11, ref: customs_declaration.f11_customs_no}
 
   - id: 14
