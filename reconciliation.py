@@ -438,6 +438,10 @@ def run(results, rules=None, doc_types=None, documents=None):
             "shipment": _cluster_label(cluster),
             "doc_types": sorted({rec["doc_type"] for rec in cluster}),
             "files": sorted({rec["file"] for rec in cluster}),
+            # que paginas/filas componen el embarque -- lo usa organize.py
+            # para copiar documentos y armar el reporte por embarque
+            "records": [{"file": rec["file"], "page": rec["page"],
+                         "doc_type": rec["doc_type"]} for rec in cluster],
             "rules": [evaluate_rule(cluster, r, doc_types) for r in rules],
             "checklist": checklist,
             "warnings": _warnings(cluster, checklist),

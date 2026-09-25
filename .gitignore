@@ -1,7 +1,6 @@
 /venv
 /fields
 /output
-/samples
 *.xlsx
 /.claude
 /.vscode

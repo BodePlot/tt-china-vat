@@ -5,8 +5,10 @@ Correr:  python gui.py
 """
 
 import io
+import os
 import queue
 import threading
+import time
 import tkinter.font
 import traceback
 from pathlib import Path
@@ -17,6 +19,7 @@ import yaml
 from PIL import Image
 
 import extract
+import organize
 import reconciliation
 from review_store import ReviewStore
 
@@ -349,7 +352,10 @@ def tab_process():
         [sg.Text("●", key="-ICON-", text_color=C["muted"], font=("Segoe UI", 14)),
          sg.Text("Ready", key="-STATUS-", text_color=C["muted"],
                  font=("Segoe UI", 10, "bold"), size=(60, 1)),
-         sg.Push(), sg.Text("0%", key="-PCT-", text_color=C["muted"])],
+         sg.Push(),
+         sg.Text("Total time", text_color=C["muted"]),
+         sg.Text("—", key="-TOTAL_TIME-", font=("Segoe UI", 10, "bold"), size=(8, 1)),
+         sg.Text("0%", key="-PCT-", text_color=C["muted"])],
         [sg.ProgressBar(100, "h", size=(55, 18), key="-BAR-", expand_x=True)],
         [sg.Text("Log", font=("Segoe UI", 11, "bold"))],
         [sg.Multiline(size=(100, 13), key="-LOG-", autoscroll=True, disabled=True,
@@ -497,7 +503,12 @@ def tab_checklist():
         [sg.Text("   PRESENT — found in the folder", text_color=C["ok"]),
          sg.Text("   MISSING — not found in the folder", text_color=C["bad"]),
          sg.Text("   MANUAL — no automatic detection for this document yet, "
-                 "check it by hand", text_color=C["warn"])],
+                 "check it by hand", text_color=C["warn"]),
+         sg.Push(),
+         sg.Button("Export by shipment", key="-ORGANIZE-", disabled=True,
+                   button_color=("#FFFFFF", C["ok"]),
+                   tooltip="One folder per shipment in output/exports/, with a "
+                           "copy of its documents and an Excel report")],
         [sg.Table(values=[], key="-CHK_SUMMARY-",
                   headings=["Shipment", "Present", "Missing", "Manual check",
                             "Warnings"],
@@ -566,6 +577,12 @@ def main():
     results, rows, cases, out_q, worker = [], [], [], queue.Queue(), None
     recon_shipments, recon_rows, recon_shown = [], [], []
     chk_summary, chk_detail = [], {}
+    recon, processed_folder = None, None
+    t_start = None                           # inicio de la corrida en curso
+
+    def fmt_elapsed(secs):
+        m, s = divmod(int(round(secs)), 60)
+        return f"{m}m {s:02d}s" if m else f"{s}s"
 
     def log(msg):
         win["-LOG-"].print(msg)
@@ -677,6 +694,10 @@ def main():
         if ev in (sg.WIN_CLOSED, "-EXIT-"):
             break
 
+        # reloj en vivo mientras corre el worker (el read() ya despierta cada 120ms)
+        if t_start is not None:
+            win["-TOTAL_TIME-"].update(fmt_elapsed(time.perf_counter() - t_start))
+
         # --- cola del worker
         while not out_q.empty():
             kind, payload = out_q.get()
@@ -707,6 +728,7 @@ def main():
                 recon_shipments = recon["shipments"]
                 recon_rows = flatten_reconciliation(recon_shipments)
                 chk_summary, chk_detail = flatten_checklist(recon)
+                win["-ORGANIZE-"].update(disabled=not recon["shipments"])
                 refresh_checklist_summary()
                 if chk_summary:
                     win["-CHK_SUMMARY-"].update(select_rows=[0])
@@ -722,11 +744,15 @@ def main():
                 n_disc = sum(1 for r in recon_rows if r[3] == "DISCREPANCY")
                 status(f"Done — {len(results)} documents, {len(cases)} to review, "
                        f"{n_disc} discrepancies", C["ok"], 100)
-                log("Done.")
+                elapsed = fmt_elapsed(time.perf_counter() - t_start)
+                win["-TOTAL_TIME-"].update(elapsed)
+                t_start = None
+                log(f"Done. Total time: {elapsed}")
             elif kind == "error":
                 log(payload)
                 win["-PROCESS-"].update(disabled=False, text="Process")
                 status("Error during processing", C["bad"], 0)
+                t_start = None               # congela el reloj en lo que llego a tardar
 
         # --- eventos
         if ev == "-PROCESS-":
@@ -741,6 +767,9 @@ def main():
             win["-LOG-"].update("")
             win["-PROCESS-"].update(disabled=True, text="Processing…")
             status("Starting…", C["primary"], 0)
+            t_start = time.perf_counter()
+            processed_folder = folder
+            win["-ORGANIZE-"].update(disabled=True)
             worker = threading.Thread(target=run_extraction,
                                       args=(folder, rules, out_q), daemon=True)
             worker.start()
@@ -750,6 +779,21 @@ def main():
 
         elif ev in ("-RECON_FILTER-", "-RECON_VERDICT-"):
             refresh_reconciliation()
+
+        elif ev == "-ORGANIZE-" and recon:
+            try:
+                out = organize.export_by_shipment(results, recon, rules["doc_types"],
+                                                  processed_folder)
+            except Exception as e:
+                sg.popup_error("Couldn't write the output by shipment:", str(e))
+                continue
+            n = len(recon["shipments"])
+            log(f"Output by shipment ({n} shipments): {out}")
+            status(f"Exported {n} shipments to {out}", C["ok"])
+            try:
+                os.startfile(out)            # abre la carpeta en el Explorador
+            except OSError:
+                pass
 
         elif ev == "-CHK_SUMMARY-" and val["-CHK_SUMMARY-"]:
             show_checklist(chk_summary[val["-CHK_SUMMARY-"][0]][0])
