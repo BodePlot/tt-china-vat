@@ -13,6 +13,7 @@ import time
 import unicodedata
 from pathlib import Path
 
+import cv2
 import openpyxl
 import pymupdf
 import yaml
@@ -23,6 +24,10 @@ OCR_DPI = 300
 # Ver triage_page() para por que el criterio es el tamano de las cajas.
 TRIAGE_ENABLED = True
 TRIAGE_MAX_BOX_HEIGHT = 250      # px a OCR_DPI
+# la deteccion del triage corre sobre la imagen achicada a esta escala: no
+# hace falta resolucion para medir el tamano de las cajas, y a 0.4 la
+# decision de saltear fue identica a la de resolucion completa en samples/
+TRIAGE_SCALE = 0.4
 
 # Paginas de un archivo puntual que se saben sin datos y el triage automatico
 # NO detecta -- confirmado a mano, no adivinado. Pagina 3 de 3.7.2 Cargo
@@ -125,22 +130,30 @@ def page_items(page) -> list[dict]:
     # texto: se reusa en vez de correr el OCR de nuevo. Sin esto el triage
     # DUPLICA el costo en toda pagina que no se saltea.
     result = triage.pop("_recognized", None)
-    if result is None:
-        result, _ = get_ocr()(png)
+    det_boxes = triage.pop("_boxes", None)
 
     # Un escaneo de costado: el reconocimiento sale bien (el modelo endereza
     # cada linea sola) pero las COORDENADAS de las cajas quedan en el marco
     # rotado, y eso rompe right/below/table_col aunque page_regex no lo note.
     # Se detecta por el aspecto de las cajas (altas en vez de anchas); cual
     # de los dos sentidos (+90/-90) es el correcto NO se puede saber por
-    # aspecto (los dos dan cajas anchas), asi que se prueban ambos y se usa
-    # el que reconoce con mas confianza -- texto boca abajo confunde al
-    # modelo, texto de costado enderezado no.
+    # aspecto (los dos dan cajas anchas) -- lo resuelve _try_rotation_fix
+    # con el clasificador de angulo, en un solo OCR.
+    #
+    # Con las cajas del triage el aspecto se ve SIN reconocer nada: una
+    # pagina de costado va directo al OCR rotado, sin pagar antes un OCR
+    # completo sin rotar que se tiraria (~6s por pagina en 3.5).
     rotation = 0
-    if _looks_rotated(result):
+    if result is None and det_boxes and _looks_rotated([[b, "", 1] for b in det_boxes]):
         angle, fixed = _try_rotation_fix(page)
         if fixed is not None:
             result, rotation = fixed, angle
+    if result is None:
+        result, _ = get_ocr()(png)
+        if _looks_rotated(result):           # sin triage (o sin cajas sueltas)
+            angle, fixed = _try_rotation_fix(page)
+            if fixed is not None:
+                result, rotation = fixed, angle
     triage["rotation"] = rotation
 
     for box, txt, conf in (result or []):
@@ -189,7 +202,8 @@ def sheet_items(ws) -> list[dict]:
 def triage_page(png_bytes):
     """
     Decide si vale la pena reconocer el texto de esta pagina, corriendo
-    SOLO la etapa de deteccion (~1.4s) en vez del OCR completo (4-25s).
+    SOLO la etapa de deteccion (~1s, ver _detect_only) en vez del OCR
+    completo (4-25s).
 
     Que distingue una pagina de terminos y condiciones: no es que tenga
     muchas cajas -- tiene MENOS que una pagina de datos. Lo que la delata
@@ -231,6 +245,10 @@ def triage_page(png_bytes):
     if not skip and _has_text(items):
         out["_recognized"] = items
         out["recognized_in_triage"] = True
+    elif not skip:
+        # cajas sueltas: page_items() las usa para ver si la pagina esta de
+        # costado ANTES de pagar el OCR sin rotar (y tambien las saca)
+        out["_boxes"] = items
     return out
 
 
@@ -244,11 +262,31 @@ def _has_text(items):
 
 def _detect_only(png_bytes):
     """
-    Pide solo la deteccion. Algunas versiones respetan use_rec=False y
-    devuelven cajas sueltas; otras lo ignoran y devuelven el resultado
-    completo [caja, texto, confianza]. Se devuelve la lista tal cual y
-    _box_height() se encarga de sacar la caja de cada elemento.
+    Solo la deteccion de cajas, sin reconocer el texto, sobre la imagen
+    achicada a TRIAGE_SCALE. Devuelve cajas sueltas en pixeles del render
+    ORIGINAL (a OCR_DPI), asi TRIAGE_MAX_BOX_HEIGHT no depende de la escala.
+
+    Se llama al detector directo porque rapidocr 1.2.3 IGNORA use_rec=False
+    en __call__: el camino "oficial" hacia el OCR completo igual, incluso
+    en las paginas de terminos que despues se saltean -- justo el costo que
+    el triage existe para evitar. Medido sobre los 3 PDF escaneados de
+    samples/: el triage paso de costar un OCR completo por pagina a ~1s.
+
+    Si la version instalada no expone text_detector, cae al camino viejo
+    (resultado completo, que _box_height() tambien sabe leer).
     """
+    eng = get_ocr()
+    if hasattr(eng, "text_detector") and hasattr(eng, "load_img"):
+        img = eng.load_img(png_bytes)
+        h, w = img.shape[:2]
+        small = cv2.resize(img, (max(1, int(w * TRIAGE_SCALE)),
+                                 max(1, int(h * TRIAGE_SCALE))))
+        boxes, _ = eng.text_detector(small)
+        if boxes is None:
+            return []
+        return [[[x / TRIAGE_SCALE, y / TRIAGE_SCALE] for x, y in b.tolist()]
+                for b in boxes]
+
     try:
         out = get_ocr()(png_bytes, use_det=True, use_cls=False, use_rec=False)
     except TypeError:
@@ -307,11 +345,35 @@ def _box_height(b):
     return _box_rect(b)[1]
 
 
-def _ocr_confidence(result):
-    """Confianza promedio de un resultado de OCR completo (caja, texto, conf)."""
-    confs = [item[2] for item in (result or [])
-             if len(item) > 2 and isinstance(item[2], (int, float))]
-    return sum(confs) / len(confs) if confs else 0.0
+def _ocr_with_flip_ratio(png_bytes):
+    """
+    OCR completo que ademas devuelve que fraccion de las lineas el
+    clasificador de angulo marco como giradas 180 grados. Es el mismo
+    pipeline de rapidocr.__call__ (deteccion -> recorte -> clasificador ->
+    reconocimiento), armado a mano solo para no tirar ese dato: __call__ lo
+    calcula y lo descarta.
+
+    Sin la API interna esperada, cae al __call__ normal con ratio 0.0 (o
+    sea "no esta al reves"), que es lo que se asumia antes.
+    """
+    eng = get_ocr()
+    needed = ("load_img", "text_detector", "sorted_boxes", "get_crop_img_list",
+              "text_cls", "text_recognizer", "filter_boxes_rec_by_score")
+    if not all(hasattr(eng, a) for a in needed):
+        return eng(png_bytes)[0], 0.0
+
+    img = eng.load_img(png_bytes)
+    boxes, _ = eng.text_detector(img)
+    if boxes is None or len(boxes) == 0:
+        return None, 0.0
+    boxes = eng.sorted_boxes(boxes)
+    crops = eng.get_crop_img_list(img, boxes)
+    crops, cls_res, _ = eng.text_cls(crops)
+    flipped = sum(1 for label, _ in cls_res if label == "180") / len(cls_res)
+    rec_res, _ = eng.text_recognizer(crops)
+    boxes, rec_res = eng.filter_boxes_rec_by_score(boxes, rec_res)
+    result = [[b.tolist(), r[0], str(r[1])] for b, r in zip(boxes, rec_res)]
+    return (result or None), flipped
 
 
 def _looks_rotated(result):
@@ -331,24 +393,32 @@ def _looks_rotated(result):
 
 def _try_rotation_fix(page):
     """
-    Prueba OCR completo con la pagina rotada +90 y -90 grados y se queda con
-    la de mejor confianza. El aspecto de las cajas no sirve para elegir el
-    sentido (ambos dan cajas anchas una vez corregidas), pero la confianza
-    de reconocimiento si: texto boca abajo (la rotacion equivocada, a 180
-    grados de la correcta) confunde al modelo mucho mas que texto derecho.
+    Un solo OCR con la pagina rotada +90. Si quedo cabeza abajo (el escaneo
+    venia girado para el otro lado), NO se vuelve a leer: el clasificador de
+    angulo ya enderezo cada linea, asi que el texto salio bien -- solo las
+    coordenadas quedaron en el marco invertido, y se dan vuelta con una
+    cuenta. El resultado es el mismo que haber leido a -90.
+
+    Por que no se elige por confianza de reconocimiento (lo que se hacia
+    antes, con un OCR completo a +90 y otro a -90): medido sobre
+    3.5 Sales Contract.pdf, las dos orientaciones dan ~0.78 de confianza
+    promedio -- el clasificador endereza cada linea sola, asi que el texto
+    al reves "se lee bien" igual. Lo que SI separa los dos sentidos es
+    cuantas lineas tuvo que dar vuelta el clasificador: 1-8 de ~55 en el
+    sentido correcto, 53-58 en el invertido.
     """
-    best = None
-    for angle in (90, -90):
-        mat = pymupdf.Matrix(OCR_DPI / 72, OCR_DPI / 72).prerotate(angle)
-        rot_png = page.get_pixmap(matrix=mat).tobytes("png")
-        try:
-            result, _ = get_ocr()(rot_png)
-        except Exception:
-            continue
-        conf = _ocr_confidence(result)
-        if best is None or conf > best[0]:
-            best = (conf, angle, result)
-    return (best[1], best[2]) if best else (0, None)
+    mat = pymupdf.Matrix(OCR_DPI / 72, OCR_DPI / 72).prerotate(90)
+    pix = page.get_pixmap(matrix=mat)
+    try:
+        result, flipped = _ocr_with_flip_ratio(pix.tobytes("png"))
+    except Exception:
+        return 0, None
+    if result is None or flipped <= 0.5:
+        return 90, result
+    w, h = pix.width, pix.height
+    flipped_result = [[[[w - x, h - y] for x, y in box], txt, conf]
+                      for box, txt, conf in result]
+    return -90, flipped_result
 
 
 # --- Clasificacion ----------------------------------------------------------
