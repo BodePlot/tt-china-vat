@@ -1,7 +1,6 @@
 /venv
 /fields
 /output
-*.xlsx
 /.claude
 /.vscode
 /__pycache__
