@@ -103,7 +103,10 @@ def build_review_cases(results):
                 if needs_review(f):
                     cases.append({
                         "doc": r["path"], "abs_path": r.get("abs_path"),
-                        "page": p["page"], "render_scale": p.get("render_scale", 1.0),
+                        # filas de tablas en PDF: 'page' es pag*100+fila, el
+                        # preview necesita la pagina real ('pdf_page')
+                        "page": p["page"], "pdf_page": p.get("pdf_page", p["page"]),
+                        "render_scale": p.get("render_scale", 1.0),
                         "rotation": p.get("rotation", 0),
                         "field": fname, "desc_zh": f.get("desc_zh", ""),
                         "value": f["value"], "conf": f["conf"],
@@ -125,6 +128,15 @@ DOC_LABELS = {
     "export_invoice": "Export Invoice (3.3)",
     "tax_filing_directory": "Refund Filing Directory (3.1)",
     "refund_record": "Refund Record (Tax Bureau)",
+    "bank_receipt": "Bank Receipt (3.4)",
+    "customs_clearance_expenses": "Customs Clearance Expenses (3.6)",
+    "transport_invoice": "Transportation Invoice (3.7.4.1)",
+    "transport_statement": "Transportation Statement (3.7.4.2)",
+    "delivery_note": "Delivery Note (3.7.4.4)",
+    "coordination_fee_invoice": "Coordination Fee Invoice (3.7.5.1)",
+    "coordination_fee_statement": "Coordination Fee Statement (3.7.5.2)",
+    "customs_fee_invoice": "Customs Declaration Fee Invoice (3.8.2.1)",
+    "customs_fee_statement": "Customs Declaration Fee Statement (3.8.2.2)",
     "bill_of_lading": "Bill of Lading (3.7.1)",
     "cargo_manifest": "Cargo Manifest (3.7.2)",
     "cargo_manifest_detail": "Cargo Manifest (3.7.2)",
@@ -684,7 +696,7 @@ def main():
         win["-REV_ZH-"].update(f"({c['desc_zh']})" if c["desc_zh"] else "")
         win["-REV_STATUS-"].update(c["status"])
         win["-REV_VALUE-"].update(fmt_value(c["value"]))
-        img = render_region(c["abs_path"], c["page"], c["origin"],
+        img = render_region(c["abs_path"], c["pdf_page"], c["origin"],
                             c["render_scale"], c.get("rotation", 0))
         win["-REV_IMG-"].update(data=img)
         win["-REV_SAVE-"].update(disabled=False)

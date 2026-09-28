@@ -35,7 +35,7 @@ documents:
 
   - code: "3.4"
     name: "Bank Receipt for Export Proceeds Collection"
-    doc_types: []
+    doc_types: [bank_receipt]
 
   - code: "3.5"
     name: "Sales and Purchase Contract"
@@ -43,7 +43,7 @@ documents:
 
   - code: "3.6"
     name: "Details of Customs Clearance Related Expenses"
-    doc_types: []
+    doc_types: [customs_clearance_expenses]
 
   - code: "3.7.1"
     name: "Bill of Lading"
@@ -55,11 +55,11 @@ documents:
 
   - code: "3.7.4.1"
     name: "Domestic Transportation Invoice"
-    doc_types: []
+    doc_types: [transport_invoice]
 
   - code: "3.7.4.2"
     name: "Reconciliation Statement - Domestic Transportation (LSR)"
-    doc_types: []
+    doc_types: [transport_statement]
 
   - code: "3.7.4.3"
     name: "Shipping Order"
@@ -67,20 +67,20 @@ documents:
 
   - code: "3.7.4.4"
     name: "Delivery Note"
-    doc_types: []
+    doc_types: [delivery_note]
 
   - code: "3.7.5.1"
     name: "Coordination & Management Fee Invoice"
-    doc_types: []
+    doc_types: [coordination_fee_invoice]
 
   - code: "3.7.5.2"
     name: "Reconciliation Statement - Coordination & Management Fees (LSR)"
-    doc_types: []
+    doc_types: [coordination_fee_statement]
 
   - code: "3.8.2.1"
     name: "Customs Declaration Fee Invoice - Yili Guangzhou"
-    doc_types: []
+    doc_types: [customs_fee_invoice]
 
   - code: "3.8.2.2"
     name: "Reconciliation Statement - Customs Declaration Fees - Yili Guangzhou (LSR)"
-    doc_types: []
+    doc_types: [customs_fee_statement]

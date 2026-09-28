@@ -42,11 +42,17 @@ JOIN_KEYS = [
     ("sales_contract", "f33_contract_no", "so"),
     ("cargo_manifest", "f46_contract_no", "so"),
     ("tax_filing_directory", "so_no_ref", "so"),
-    ("shipping_order", "so_no_ref", "so"),
+    ("shipping_order", "f57_contract_no", "so"),
+    ("delivery_note", "f64_contract_no", "so"),
+    ("customs_clearance_expenses", "f36_contract_no", "so"),
+    ("transport_statement", "f53_contract_no", "so"),
+    ("coordination_fee_statement", "f73_contract_no", "so"),
+    ("customs_fee_statement", "f81_contract_no", "so"),
     ("customs_declaration", "f16_container_nos", "container"),
     ("bill_of_lading", "f43_container_nos", "container"),
     ("cargo_manifest_detail", "f45_container_nos", "container"),
     ("shipping_order", "f58_container_no", "container"),
+    ("delivery_note", "f65_container_nos", "container"),
     # el refund record del fisco NO trae SO ni contenedor: se ata por N° de
     # CDF, que tambien esta en el propio CDF, en la factura (renglon de
     # notas) y en el 3.1
@@ -443,7 +449,10 @@ def _warnings(cluster, checklist, doc_types, claims_loaded):
     if len(sos) > 1:
         out.append(f"mixes {len(sos)} different SOs ({', '.join(sos)}) -- "
                    "check that these documents belong to the same shipment")
-    single = {dt for dt, cfg in doc_types.items() if cfg.get("single_file")}
+    # single_file: lo cubre folder_warnings(); multiple: es normal que haya
+    # varios (ej. un Delivery Note por camion)
+    single = {dt for dt, cfg in doc_types.items()
+              if cfg.get("single_file") or cfg.get("multiple")}
     for item in checklist:
         if set(item.get("doc_types", [])) & single:
             continue              # ya lo cubre folder_warnings(), una sola vez
@@ -452,6 +461,71 @@ def _warnings(cluster, checklist, doc_types, claims_loaded):
             out.append(f"{item['code']} {item['name']} comes from "
                        f"{len(files)} different files: {', '.join(files)}")
     return out
+
+
+def _field_values(rec, suffix):
+    """Valores de los campos cuyo nombre termina en 'suffix' (ej. '_lsr_no')."""
+    out = []
+    for name, f in rec["fields"].items():
+        if name.endswith(suffix) and f.get("value") not in (None, ""):
+            out += [_normalize_id(v) for v in _as_list(f["value"])]
+    return [v for v in out if v]
+
+
+def _shipment_amounts_usd(cluster):
+    """Montos USD del embarque: los del refund record (fuente del fisco) y,
+    si no esta, el de la factura de exportacion."""
+    vals = []
+    for rec in cluster:
+        if rec["doc_type"] == CLAIM_DOC_TYPE:
+            vals.append(rec["fields"].get("amount_usd", {}).get("value"))
+        elif rec["doc_type"] == "export_invoice":
+            vals.append(rec["fields"].get("f23_amount_usd", {}).get("value"))
+    return [v for v in vals if v is not None]
+
+
+def _attach(clusters, attachables, doc_types):
+    """
+    Adjunta a los embarques los documentos que no se pueden usar para unir
+    (attach_by en rules.yaml). Modifica 'clusters' en el lugar y devuelve
+    los que no se pudieron adjuntar, con el motivo.
+
+      lsr        -> facturas mensuales de gastos: van a CADA embarque cuyo
+                    estado de cuenta (filas con *_lsr_no) tenga ese LSR. Una
+                    misma factura puede quedar en varios embarques: es
+                    correcto, cubre todas las SO del mes.
+      amount_usd -> cobro bancario: va al embarque cuyo monto USD coincide,
+                    SOLO si coincide uno. Si coinciden varios no se adivina.
+    """
+    lost = []
+    lsr_of = [set(v for rec in c for v in _field_values(rec, "_lsr_no")) for c in clusters]
+    for rec in attachables:
+        how = doc_types[rec["doc_type"]]["attach_by"]
+        base = {"file": rec["file"], "page": rec["page"], "doc_type": rec["doc_type"]}
+        if how == "lsr":
+            mine = set(_field_values(rec, "_lsr_no"))
+            hits = [i for i, lsrs in enumerate(lsr_of) if mine & lsrs]
+            reason = (f"LSR {', '.join(sorted(mine)) or '(not read)'} is not in the "
+                      "statement rows of any shipment in the folder")
+        elif how == "amount_usd":
+            amount = next((f["value"] for n, f in rec["fields"].items()
+                           if n.endswith("_amount") and f.get("value") is not None), None)
+            hits = [i for i, c in enumerate(clusters)
+                    if amount is not None
+                    and any(_numbers_close(amount, a) for a in _shipment_amounts_usd(c))]
+            if len(hits) > 1:
+                reason = (f"amount USD {amount:,.2f} matches {len(hits)} shipments -- "
+                          "can't tell which one without an SO or CDF on the receipt")
+                hits = []
+            else:
+                reason = f"amount USD {amount} matches no shipment"
+        else:
+            hits, reason = [], f"unknown attach_by '{how}'"
+        for i in hits:
+            clusters[i].append(rec)
+        if not hits:
+            lost.append({**base, "reason": reason})
+    return lost
 
 
 def run(results, rules=None, doc_types=None, documents=None):
@@ -468,21 +542,30 @@ def run(results, rules=None, doc_types=None, documents=None):
     documents = documents if documents is not None else load_checklist()
 
     records = build_records(results)
-    clusters = cluster_records(records)
+    # los documentos con attach_by (facturas mensuales, cobro bancario) NO
+    # participan del union-find: se adjuntan despues, ver _attach()
+    attachables = [r for r in records if doc_types.get(r["doc_type"], {}).get("attach_by")]
+    clusters = cluster_records([r for r in records if r not in attachables])
     # "no esta reclamado" solo tiene sentido si el refund record esta en la
     # carpeta; sin el, todas las exportaciones darian ese aviso
     claims_loaded = any(rec["doc_type"] == CLAIM_DOC_TYPE for rec in records)
 
-    shipments, unassigned = [], []
+    kept, unassigned = [], []
     for cluster in clusters:
         if not any(_key_values(rec) for rec in cluster):
             unassigned += [{"file": rec["file"], "page": rec["page"],
-                            "doc_type": rec["doc_type"]} for rec in cluster]
+                            "doc_type": rec["doc_type"],
+                            "reason": "no SO, container or CDF number"} for rec in cluster]
             continue
         if _only_logs(cluster, doc_types) and not _claimed(cluster):
             continue          # embarque que solo figura en los logs, sin docs en la carpeta
         # si esta en el refund record, se reporta AUNQUE no tenga documentos:
         # "se reclamo el reintegro y no hay legajo" es lo mas grave de todo
+        kept.append(cluster)
+    unassigned += _attach(kept, attachables, doc_types)
+
+    shipments = []
+    for cluster in kept:
         # un embarque con un solo documento se reporta igual: sus reglas
         # salen NOT_VERIFIABLE y el checklist muestra lo que falta, que es
         # justamente lo que hay que saber de el

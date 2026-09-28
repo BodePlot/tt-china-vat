@@ -190,6 +190,9 @@ doc_types:
         - "统一社会信用代码"
       negative:
         - "商业发票"
+        # las facturas de gastos (3.7.4.1, 3.7.5.1, 3.8.2.1) tambien son
+        # 电子发票 pero "especiales de IVA"; la de exportacion es 普通发票
+        - "增值税专用发票"
 
     fields:
 
@@ -505,10 +508,36 @@ doc_types:
         multi: true
         unique: true
 
-      so_no_ref:
+      f57_contract_no:
         desc_zh: "SAP订单号"                    # (SAP order no. = SO del contrato)
         strategy: xlsx_col
         header: "SAP订单号"
+
+      f59_transport_date:
+        desc_zh: "实际提货日期"                  # (fecha real de retiro)
+        strategy: xlsx_col
+        header: "实际提货日期"
+
+      f60_license_plate:
+        desc_zh: "设备ID"                        # (patente del camion; = 船名/车牌 del Delivery Note)
+        strategy: xlsx_col
+        header: "设备ID"
+
+      f61_net_weight:
+        desc_zh: "提货件数"                      # (cantidad retirada; viene en kg: 25500)
+        strategy: xlsx_col
+        header: "提货件数"
+        type: number
+
+      f62_origin:
+        desc_zh: "起始地地址"
+        strategy: xlsx_col
+        header: "起始地地址"
+
+      f63_destination:
+        desc_zh: "目的地名称"                    # (codigo de destino, ej. CNYANTIAN = 交货地址 del Delivery Note)
+        strategy: xlsx_col
+        header: "目的地名称"
 
   # ---------------------------------------------------------------------------
   # Refund record from TAX BUREAU -- el export del sistema del fisco con una
@@ -667,3 +696,352 @@ doc_types:
         desc_zh: "出口退税申报日期"
         strategy: xlsx_col
         header: "出口退税申报日期"
+
+  # ===========================================================================
+  # Documentos de gastos y cobro (items 30-32, 36-40, 48-56, 64-84 de rules.xlsx)
+  # Samples reales de la exportacion 13194443, pasados por el equipo el
+  # 2026-09-28. Todos PDF con texto nativo salvo 3.4 (captura PNG -> OCR) y
+  # 3.6 (xlsx).
+  #
+  # Como se atan al embarque (ver reconciliation.py):
+  #   - 3.6, 3.7.4.4 y las filas de los estados de cuenta traen SO -> se unen
+  #     normal (JOIN_KEYS).
+  #   - las facturas 3.7.4.1/3.7.5.1/3.8.2.1 son MENSUALES y no traen SO,
+  #     solo el N° de LSR: se ADJUNTAN (attach_by: lsr) a cada embarque cuyo
+  #     estado de cuenta tenga ese LSR. Nunca se usan para unir: una misma
+  #     factura cubre todas las SO del mes y pegaria todos los embarques.
+  #   - 3.4 no trae SO ni CDF: se adjunta por monto (attach_by: amount_usd)
+  #     solo si coincide con UN embarque.
+  # ===========================================================================
+
+  # ---------------------------------------------------------------------------
+  # 3.4 Bank Receipt -- aviso de credito del banco (Bank of America). Llego
+  # como captura PNG: pasa por OCR como un escaneo.
+  bank_receipt:
+    label_es: "Comprobante de cobro de la exportacion"
+    label_zh: "收汇水单"
+    attach_by: amount_usd
+
+    signature:
+      required:
+        - "Transaction Credit Advice"
+      optional:
+        - "Value Date"
+        - "Bank Reference Number"
+        - "Amount"
+      negative: []
+
+    fields:
+      f30_cash_receipt_date:
+        desc_zh: "Value Date"                    # (cash receipt date, MM/DD/YYYY)
+        strategy: page_regex
+        regex: 'Value\s*Date\s+(\d{2}/\d{2}/\d{4})'
+
+      f31_cash_receipt_amount:
+        desc_zh: "Amount"
+        strategy: page_regex
+        regex: '\bAmount\s+([\d,]+\.\d{2})'
+        type: number
+
+      f32_bank_slip_file_name:
+        desc_zh: "(nombre del archivo)"
+        strategy: file_name
+
+  # ---------------------------------------------------------------------------
+  # 3.6 Details of Customs Clearance Related Expenses -- export de SAP, una
+  # fila por cargo (flete, fee de gestion, documentacion), de muchas SO.
+  # El item 37 (LSR No. custom declaration) NO es una columna de este export:
+  # queda sin extraer hasta confirmar de donde sale.
+  customs_clearance_expenses:
+    label_es: "Detalle de gastos de despacho y logistica"
+    label_zh: "报关相关费用明细"
+    source_ext: xlsx
+    per_row: true
+
+    signature:
+      required:
+        - "Freight Order/Book."
+        - "Charge Type Desc."
+      optional:
+        - "Freight Settlement Document"
+        - "Net Amount"
+      negative: []
+
+    fields:
+      f36_contract_no:
+        desc_zh: "Order"                         # (SO)
+        strategy: xlsx_col
+        header: "Order"
+        exact: true                              # "Freight Order/Book." tambien contiene "Order"
+        regex: '\d{8}'
+
+      f38_charge_type:
+        desc_zh: "Charge Type Desc."
+        strategy: xlsx_col
+        header: "Charge Type Desc."
+
+      f39_supplier_name:
+        desc_zh: "Carrier Description"
+        strategy: xlsx_col
+        header: "Carrier Description"
+
+      f40_charge_amount:
+        desc_zh: "Net Amount"
+        strategy: xlsx_col
+        header: "Net Amount"
+        type: number
+
+      freight_order:
+        desc_zh: "Freight Order/Book."           # (= FO de los estados de cuenta)
+        strategy: xlsx_col
+        header: "Freight Order/Book."
+
+  # ---------------------------------------------------------------------------
+  # Facturas de gastos (fapiao especial de IVA, 增值税专用发票), una por mes y
+  # por servicio. Los montos con ¥ salen en orden neto / IVA / total: el item
+  # "Invoice Amount" se toma como el TOTAL con IVA, que es el que el estado
+  # de cuenta pide que coincida ("invoice total amount matches the LSR total").
+  transport_invoice:
+    label_es: "Factura de transporte interno"
+    label_zh: "货物运输服务 增值税专用发票"
+    attach_by: lsr
+
+    signature:
+      required:
+        - "增值税专用发票"
+        - "运输服务"
+      optional:
+        - "运输工具牌号"
+        - "LSR"
+      negative:
+        - "物流辅助服务"
+        - "代理报关"
+
+    fields:
+      f48_invoice_no:
+        desc_zh: "发票号码"
+        strategy: page_regex
+        regex: '(?<!\d)(\d{20})(?!\d)'
+      f49_invoice_amount:
+        desc_zh: "价税合计(小写)"
+        strategy: page_regex
+        regex: '¥\s*([\d,]+\.\d{2})'
+        pick: last
+        type: number
+      f50_lsr_no:
+        desc_zh: "LSR No"
+        strategy: page_regex
+        regex: 'LSR\s*(?:No\s*:?)?\s*(\d{10})'
+      f51_license_plate:
+        desc_zh: "运输工具牌号"
+        strategy: page_regex
+        regex: '([京津沪渝冀豫云辽黑湘皖鲁新苏浙赣鄂桂甘晋蒙陕吉闽贵粤青藏川宁琼][A-Z][A-Z0-9]{5})'
+
+  coordination_fee_invoice:
+    label_es: "Factura de coordinacion y gestion (almacenaje)"
+    label_zh: "物流辅助服务 增值税专用发票"
+    attach_by: lsr
+
+    signature:
+      required:
+        - "增值税专用发票"
+        - "物流辅助服务"
+      optional:
+        - "仓储"
+        - "LSR"
+      negative:
+        - "运输服务"
+        - "代理报关"
+
+    fields:
+      f69_invoice_no:
+        desc_zh: "发票号码"
+        strategy: page_regex
+        regex: '(?<!\d)(\d{20})(?!\d)'
+      f70_invoice_amount:
+        desc_zh: "价税合计(小写)"
+        strategy: page_regex
+        regex: '¥\s*([\d,]+\.\d{2})'
+        pick: last
+        type: number
+      f71_lsr_no:
+        desc_zh: "LSR No"
+        strategy: page_regex
+        regex: 'LSR\s*(?:No\s*:?)?\s*(\d{10})'
+
+  customs_fee_invoice:
+    label_es: "Factura de despacho aduanero (Yili Guangzhou)"
+    label_zh: "代理报关 增值税专用发票"
+    attach_by: lsr
+
+    signature:
+      required:
+        - "增值税专用发票"
+        - "代理报关"
+      optional:
+        - "经纪代理服务"
+        - "LSR"
+      negative:
+        - "运输服务"
+        - "物流辅助服务"
+
+    fields:
+      f77_lsr_no:
+        desc_zh: "LSR"
+        strategy: page_regex
+        regex: 'LSR\s*(?:No\s*:?)?\s*(\d{10})'
+      f78_invoice_no:
+        desc_zh: "发票号码"
+        strategy: page_regex
+        regex: '(?<!\d)(\d{20})(?!\d)'
+      f79_invoice_amount:
+        desc_zh: "价税合计(小写)"
+        strategy: page_regex
+        regex: '¥\s*([\d,]+\.\d{2})'
+        pick: last
+        type: number
+
+  # ---------------------------------------------------------------------------
+  # Estados de cuenta LSR ("Logistics Services Report") -- mensuales, una fila
+  # por camion y por cargo, de TODAS las SO del mes. Se leen fila por fila
+  # ('rows', ver extract._pdf_row_records) y cada fila se ata a su SO. El
+  # N° de LSR del encabezado se copia a cada fila. Los tres comparten formato:
+  # se distinguen por el tipo de cargo de las filas. Fechas en MM/DD/YYYY.
+  transport_statement:
+    label_es: "Estado de cuenta LSR - transporte"
+    label_zh: "运输费对账单"
+    per_row: true
+
+    signature:
+      required:
+        - "Logistics Services Report"
+        - "Truck Freight"
+      optional:
+        - "LSR No"
+        - "Gross Weight"
+      negative:
+        - "Management Fee"
+        - "Documentation"
+
+    fields:
+      f52_lsr_no:
+        desc_zh: "LSR No"
+        strategy: page_regex
+        regex: 'LSR\s*No\s*:\s*(\d{10})'
+
+    rows:
+      regex: '(?P<fsd>\d{10})\s+(?P<so>\d{8})\s+(?P<fo>\d{10})\s+(?P<date>\d{2}/\d{2}/\d{4}).*?(?P<gross>[\d,]+\.\d{3})\s+(?P<net>[\d,]+\.\d{3})\s+(?P<charge>[^\n]+)'
+      fields:
+        f53_contract_no: {group: so, desc_zh: "SO/STO"}
+        f54_net_weight: {group: net, type: number, desc_zh: "Net Weight (KG)"}
+        f55_gross_weight: {group: gross, type: number, desc_zh: "Gross Weight (KG)"}
+        f56_transport_date: {group: date, desc_zh: "Shipment Date (MM/DD/YYYY)"}
+        freight_order: {group: fo, desc_zh: "Freight order"}
+        charge_description: {group: charge, desc_zh: "Charge Description"}
+
+  coordination_fee_statement:
+    label_es: "Estado de cuenta LSR - coordinacion y gestion"
+    label_zh: "物流管理费对账单"
+    per_row: true
+
+    signature:
+      required:
+        - "Logistics Services Report"
+        - "Management Fee"
+      optional:
+        - "LSR No"
+      negative:
+        - "Truck Freight"
+        - "Documentation"
+
+    fields:
+      f72_lsr_no:
+        desc_zh: "LSR No"
+        strategy: page_regex
+        regex: 'LSR\s*No\s*:\s*(\d{10})'
+
+    rows:
+      regex: '(?P<fsd>\d{10})\s+(?P<so>\d{8})\s+(?P<fo>\d{10})\s+(?P<date>\d{2}/\d{2}/\d{4}).*?(?P<gross>[\d,]+\.\d{3})\s+(?P<net>[\d,]+\.\d{3})\s+(?P<charge>[^\n]+)'
+      fields:
+        f73_contract_no: {group: so, desc_zh: "SO/STO"}
+        f74_net_weight: {group: net, type: number, desc_zh: "Net Weight (KG)"}
+        f75_gross_weight: {group: gross, type: number, desc_zh: "Gross Weight (KG)"}
+        f76_transport_date: {group: date, desc_zh: "Shipment Date (MM/DD/YYYY)"}
+        freight_order: {group: fo, desc_zh: "Freight order"}
+        charge_description: {group: charge, desc_zh: "Charge Description"}
+
+  customs_fee_statement:
+    label_es: "Estado de cuenta LSR - despacho aduanero"
+    label_zh: "报关费对账单"
+    per_row: true
+
+    signature:
+      required:
+        - "Logistics Services Report"
+        - "Documentation"
+      optional:
+        - "LSR No"
+      negative:
+        - "Truck Freight"
+        - "Management Fee"
+
+    fields:
+      f80_lsr_no:
+        desc_zh: "LSR No"
+        strategy: page_regex
+        regex: 'LSR\s*No\s*:\s*(\d{10})'
+
+    rows:
+      regex: '(?P<fsd>\d{10})\s+(?P<so>\d{8})\s+(?P<fo>\d{10})\s+(?P<date>\d{2}/\d{2}/\d{4}).*?(?P<gross>[\d,]+\.\d{3})\s+(?P<net>[\d,]+\.\d{3})\s+(?P<charge>[^\n]+)'
+      fields:
+        f81_contract_no: {group: so, desc_zh: "SO/STO"}
+        f82_net_weight: {group: net, type: number, desc_zh: "Net Weight (KG)"}
+        f83_gross_weight: {group: gross, type: number, desc_zh: "Gross Weight (KG)"}
+        f84_transport_date: {group: date, desc_zh: "Shipment Date (MM/DD/YYYY)"}
+        freight_order: {group: fo, desc_zh: "Freight order"}
+        charge_description: {group: charge, desc_zh: "Charge Description"}
+
+  # ---------------------------------------------------------------------------
+  # 3.7.4.4 Delivery Note -- uno por camion/contenedor (una exportacion con 2
+  # contenedores trae 2): 'multiple' evita el aviso de "mismo documento en
+  # varios archivos". Etiqueta y valor en la misma fila -> strategy right.
+  delivery_note:
+    label_es: "Nota de entrega (por camion)"
+    label_zh: "发货单"
+    multiple: true
+
+    signature:
+      required:
+        - "DELIVERY NOTE"
+        - "发货单"
+      optional:
+        - "定货号码"
+        - "集装箱号"
+        - "货运日期"
+      negative: []
+
+    fields:
+      f64_contract_no:
+        desc_zh: "定货号码"                      # (Order No. = SO)
+        strategy: right
+        label: "定货号码"
+      f65_container_nos:
+        desc_zh: "集装箱号"
+        strategy: page_regex
+        # \b: la referencia "EXXON-CHINA20022025" contiene "HINA2002202",
+        # que tiene forma de contenedor si no se exige palabra completa
+        regex: '\b[A-Z]{4}\d{7}\b'
+        multi: true
+        unique: true
+      f66_transport_date:
+        desc_zh: "货运日期"
+        strategy: right
+        label: "货运日期"
+      f67_license_plate:
+        desc_zh: "船名/车牌"
+        strategy: right
+        label: "船名/车牌"
+      f68_destination:
+        desc_zh: "交货地址"
+        strategy: right
+        label: "交货地址"

@@ -459,11 +459,17 @@ def classify(items, doc_types, min_score=0.5, min_margin=0.15):
 
 
 # --- Localizadores ----------------------------------------------------------
-def _find_label(items, label):
-    """Primera caja que contiene la etiqueta (comparando normalizado)."""
+def _find_label(items, label, exact=False):
+    """
+    Primera caja que contiene la etiqueta (comparando normalizado).
+    exact=True exige la caja entera: en 3.6 el header "Order" esta contenido
+    en "Freight Order/Book." -- con 'contiene' se agarraba la columna
+    equivocada.
+    """
     lab_n = normalize(label)
     for it in items:
-        if lab_n in normalize(it["text"]):
+        txt = normalize(it["text"])
+        if (txt == lab_n) if exact else (lab_n in txt):
             return it
     return None
 
@@ -544,7 +550,10 @@ def loc_page_regex(items, spec):
         found = list(dict.fromkeys(found))
     if spec.get("multi"):
         return {"value": found, "conf": min(i["conf"] for i in items)}
-    return {"value": found[0], "conf": 1.0}
+    # pick: last -> ej. en un fapiao los montos con ¥ salen en orden neto,
+    # IVA, total con IVA; el total es el ultimo
+    return {"value": found[-1] if spec.get("pick") == "last" else found[0],
+            "conf": 1.0}
 
 
 def loc_xlsx_col(items, spec):
@@ -555,7 +564,7 @@ def loc_xlsx_col(items, spec):
     las filas debajo del header, porque cada fila es un registro propio
     (ej. un despacho de camion), no una linea partida de la misma celda.
     """
-    lab = _find_label(items, spec["header"])
+    lab = _find_label(items, spec["header"], spec.get("exact", False))
     if not lab:
         return None
     col = lab["x"]
@@ -807,12 +816,21 @@ def process_pdf(path, rules):
 
         cls = classify(items, rules["doc_types"])
         rec["classification"] = cls
+        cfg = rules["doc_types"][cls["type"]] if cls["type"] else {}
         if cls["type"]:
-            for fname, spec in rules["doc_types"][cls["type"]]["fields"].items():
-                f = resolve_field(items, spec)
-                f = corroborate(items, f, spec)
+            for fname, spec in cfg["fields"].items():
+                if spec.get("strategy") == "file_name":
+                    # el dato ES el nombre del archivo (ej. 3.4 "Bank slip pdf
+                    # file name"): no hay nada que buscar en la pagina
+                    f = {"value": Path(path).name, "conf": 1.0, "status": "OK"}
+                else:
+                    f = resolve_field(items, spec)
+                    f = corroborate(items, f, spec)
                 f["desc_zh"] = spec.get("desc_zh", "")
                 rec["fields"][fname] = f
+        if cfg.get("rows"):
+            pages.extend(_pdf_row_records(page, rec, cfg["rows"]))
+            continue
         pages.append(rec)
     doc.close()
     if cache_dirty:
@@ -820,7 +838,46 @@ def process_pdf(path, rules):
     return {"file": Path(path).name, "pages": pages}
 
 
-PROCESSORS = {".pdf": process_pdf, ".xlsx": process_xlsx}
+def _pdf_row_records(page, rec, rows_spec):
+    """
+    Tablas en PDF con filas de MUCHOS embarques (ej. los estados de cuenta
+    LSR mensuales: una fila por camion, de todas las SO del mes). Igual que
+    per_row en un xlsx: cada fila es un record propio, asi cada una se ata
+    solo al embarque de su SO. Los campos de la pagina (ej. el N° de LSR del
+    encabezado) se copian a cada fila.
+
+    'page' de cada fila = pagina*100 + n° de fila (201 = pag. 2, fila 1),
+    para que sea unico dentro del archivo; 'pdf_page' guarda la pagina real
+    para el preview de la GUI. Una pagina sin filas (caratula, totales) se
+    registra como SKIPPED: si quedara como record sin claves, terminaria en
+    "sin asignar" porque el resto del archivo cae en muchos embarques.
+    """
+    rx = re.compile(rows_spec["regex"], re.S)
+    text = unicodedata.normalize("NFKC", page.get_text())
+    out = []
+    for n, m in enumerate(rx.finditer(text), start=1):
+        fields = dict(rec["fields"])
+        for fname, fspec in rows_spec["fields"].items():
+            val = m.group(fspec["group"]).strip()
+            if fspec.get("type") == "number":
+                val = to_number(val)
+            fields[fname] = {"value": val, "conf": 1.0,
+                             "status": "OK" if val not in (None, "") else "NOT_FOUND",
+                             "desc_zh": fspec.get("desc_zh", "")}
+        out.append({**rec, "page": rec["page"] * 100 + n, "pdf_page": rec["page"],
+                    "fields": fields})
+    if not out:
+        out.append({**rec, "fields": {},
+                    "triage": {**rec["triage"], "reason": "statement page without rows (cover / totals)"},
+                    "classification": {**rec["classification"], "type": None,
+                                       "status": "SKIPPED"}})
+    return out
+
+
+# las imagenes (ej. 3.4 Bank Receipt como captura PNG) se abren con pymupdf
+# como un documento de una pagina y van por el mismo camino que un escaneo
+PROCESSORS = {".pdf": process_pdf, ".xlsx": process_xlsx,
+              ".png": process_pdf, ".jpg": process_pdf, ".jpeg": process_pdf}
 
 
 def duplicate_single_files(folder, rules):

@@ -99,7 +99,7 @@ rules:
       - {item: 43, ref: bill_of_lading.f43_container_nos}
       - {item: 45, ref: cargo_manifest_detail.f45_container_nos}
       - {item: 58, ref: shipping_order.f58_container_no}
-      - {item: 65, ref: null, note: "Delivery Note (3.7.4.4) -- sin sample ni doc_type todavia"}
+      - {item: 65, ref: delivery_note.f65_container_nos}
 
   - id: 8
     desc: "Contract number (SO): CDF == VAT invoice"
