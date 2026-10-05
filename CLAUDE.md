@@ -39,14 +39,15 @@ marque otra cosa.
 | `extract.py` | Lee PDF/xlsx → clasifica cada página por su **contenido** (firmas) → extrae campos por su **relación con la etiqueta impresa**, nunca por coordenadas absolutas ni por nombre de archivo. Tiene caché de OCR. |
 | `rules.yaml` | Por doc_type: firma (`required` / `optional` / `negative`) y campos con estrategia (`inline`, `below`, `right`, `in_label`, `page_regex`, `table_col`, `xlsx_col`). `per_row: true` = log con muchas exportaciones: cada fila es un documento aparte. |
 | `reconciliation.py` | Agrupa por exportación (union-find), evalúa reglas, arma checklist y avisos. `run()` → `{"shipments": [...], "unassigned": [...]}`. |
-| `reconciliation.yaml` | Las reglas de cruce. `verifiable: false` = la regla compara datos que nunca van a ser iguales como texto. `unit:` convierte unidades (kg/ton). |
+| `reconciliation.yaml` | Las reglas de cruce. `check: false` = solo se muestran los datos (veredicto INFO, reglas 3 y 4). `compare: alnum` = ignora espacios y "/" (regla 6). `unit:` convierte unidades (kg/ton). |
 | `checklist.yaml` | Los 17 documentos del legajo (DS + 3.1 … 3.8.2.2) y qué doc_types cuentan como cada uno. Hoy todos tienen extractor; vacío = sin extractor → MANUAL. |
-| `organize.py` | Salida por exportación: `output/exports/<fecha_hora>/<SO>/documents/` (copias) + `<SO>_report.xlsx`. Los logs compartidos no se copian; sus filas van al reporte. |
+| `organize.py` | Salida por exportación: `output/exports/<fecha_hora>/<SO>/documents/` (copias) + `<SO>_report.xlsx`. Los logs compartidos no se copian; sus filas van al reporte. Además `consolidated_report.xlsx` con todas las exportaciones (pedido del equipo de China): Overview, Discrepancies, Missing docs, All rules. |
 | `gui.py` | FreeSimpleGUI. Pestañas: Process, Results, Review (corrección manual con recorte del documento), Checklist (+ botón "Export by shipment"), Reconciliation. |
 | `review_store.py` | Correcciones manuales persistidas en `output/corrections.json`. |
 
 Correr: `python gui.py` · CLI: `python extract.py samples` / `python reconciliation.py samples` / `python organize.py samples`.
-Siempre con `venv/Scripts/python.exe`. `samples/`, `output/` y `*.xlsx` están en .gitignore: **samples no tiene backup**.
+Siempre con `venv/Scripts/python.exe`. `xlrd` (en el venv) lee los `.xls` viejos. `output/` y `samples2/` están en
+.gitignore; `samples/` sí está commiteado.
 
 ## Lógica del proceso
 
@@ -59,11 +60,16 @@ Siempre con `venv/Scripts/python.exe`. `samples/`, `output/` y `*.xlsx` están e
    "unassigned". Se descartan los grupos formados solo por filas de logs (exportaciones que no tienen documentos en la
    carpeta).
 4. **Reglas**: VERIFIED (≥2 patas confiables y coinciden) / DISCREPANCY (las patas confiables no coinciden) /
-   NOT_VERIFIABLE (faltan patas, confianza baja o `verifiable: false`). Una pata de baja confianza puede confirmar,
-   pero nunca acusa. Los IDs se comparan exactos, las listas por superposición y los números con tolerancia.
+   NOT_VERIFIABLE (faltan patas o confianza baja) / INFO (`check: false`, solo se muestra). Una pata de baja
+   confianza puede confirmar, pero nunca acusa. Los IDs se comparan exactos, las listas por superposición y los
+   números **exactos, sin tolerancia** (pedido del equipo: las diferencias las revisan caso por caso).
+   Varios documentos del mismo tipo en una exportación (`_combine_legs`): si coinciden, es un valor. Si no, los IDs
+   se juntan en una lista (alcanza con que uno coincida) y los números quedan **MULTI**: no se suman ni se elige
+   uno, porque pueden ser partes de un total (varias facturas) o versiones del mismo documento (CDF corregido).
 5. **Checklist**: PRESENT / MISSING (tiene extractor y no está) / MANUAL (sin extractor: no se afirma nada).
    Avisos: "mixes N different SOs" y "same document from N different files". El union-find es transitivo, así que
-   un contenedor mal leído puede pegar dos exportaciones.
+   un contenedor mal leído puede pegar dos exportaciones. Si las SO comparten un único CDF, el aviso dice "one CDF
+   covers N SOs" (caso válido, confirmado por el equipo).
 6. **Un solo archivo ancla por carpeta**: los tipos con `single_file: true` (el 3.1 y el refund record) no pueden
    estar duplicados. `extract.duplicate_single_files()` los busca ANTES de procesar (son xlsx: es instantáneo) y la
    GUI y la CLI **no procesan** si hay más de uno: piden dejar uno solo. `reconciliation.folder_warnings()` queda
@@ -79,7 +85,8 @@ Siempre con `venv/Scripts/python.exe`. `samples/`, `output/` y `*.xlsx` están e
    - Los **estados de cuenta LSR** (3.7.4.2, 3.7.5.2, 3.8.2.2) son PDFs mensuales con filas de todas las SO del mes:
      `rows:` en rules.yaml los lee fila por fila (`extract._pdf_row_records`, page = pág*100+fila) y cada fila se une
      por su SO, como un log `per_row`.
-   - `multiple: true` (Delivery Note, uno por camión): no dispara el aviso "same document from N files".
+   - `multiple: true` (Delivery Note, uno por camión; factura de exportación, porque un CDF con varias facturas es
+     frecuente): no dispara el aviso "same document from N files".
 
 ## OCR y rendimiento (CPU only: la PC corporativa no tiene GPU)
 
@@ -114,10 +121,24 @@ Siempre con `venv/Scripts/python.exe`. `samples/`, `output/` y `*.xlsx` están e
   pasa por OCR), `3.6 … .xlsx` (export de SAP), facturas `3.7.4.1`, `3.7.5.1`, `3.8.2.1`, estados de cuenta LSR
   `3.7.4.2`, `3.7.5.2`, `3.8.2.2` (traen filas de las 5 SO de nuestras exportaciones, que son SO reales) y
   `3.7.4.4 Delivery Note 1/2.pdf` (uno por contenedor).
-- Resultado esperado: exportaciones 1-4 → 11 VERIFIED, 3 NOT_VERIFIABLE (3, 4 y 6, por diseño), 0 discrepancias.
-  Exportación 5 → DISCREPANCY en las reglas 11 y 13. Más 9 "exportaciones" `CDF 5304…`: reclamadas sin documentos.
+- Resultado esperado: exportaciones 1-4 → 12 VERIFIED, 2 INFO (reglas 3 y 4), 0 discrepancias.
+  Exportación 5 → igual, pero con DISCREPANCY en las reglas 11 y 13. Más 9 "exportaciones" `CDF 5304…`: reclamadas
+  sin documentos.
   Checklist: la 13194443 tiene 16/17 PRESENT (falta el 3.4, que queda unassigned por monto ambiguo); las 2-5 tienen
   14/17 (les faltan 3.4, 3.6 y 3.7.4.4, que solo existen para la 13194443).
+
+### samples2/ (reales, llegaron el 2026-10-05 desde el OneDrive del equipo; todavía NO se procesó entero)
+
+- `List of Exports.xls`: el **refund record real** de julio 2026 (export de eTAX, 109 filas). Ya lo lee el
+  doc_type `refund_record` (ver el comentario en rules.yaml). Ninguna fila coincide con las exportaciones de
+  `samples/`; sí están las 2 de líquidos de abajo.
+- `SO 13349718 PP` / `SO 13368987 PP`: polipropileno de enero (no están en el archivo de julio). B/L con **otro
+  formato** (impresión del sistema, `IMOCODE:` + `航次号:`) que hoy no se clasifica.
+- `SO 6755067 B1-1-丁烯` / `SO 6759315 BD-丁二烯`: líquidos. Subcarpetas con OTRA numeración (3.6.1 B/L, 3.6.2
+  manifiesto, 3.7.1.x contrato Sinotrans, 3.7.2.x despachante). Varias versiones del CDF (`已修改价格` / `已修改数量`)
+  → sus números van a dar MULTI. Fapiao y B/L escaneados sin texto.
+- `3.7.4.3 26年1月出运单.xls` (Shipping Order de enero, se clasifica bien) y `370041183 03092026 9167479.70.pdf`
+  (parece un cobro bancario, escaneado).
 
 ## Trampas conocidas
 
@@ -132,6 +153,9 @@ Siempre con `venv/Scripts/python.exe`. `samples/`, `output/` y `*.xlsx` están e
   campo, no el esquema entero.
 - Antes de culpar a la extracción por una "discrepancia": mirar la página real. Varias veces el problema era la regla
   (unidades kg/ton en la regla 9; datos no equivalentes en las reglas 3, 4 y 6).
+- Los archivos que manda el usuario suelen llegar como `.txt` en **base64** (Office = empieza con `UEsDB`; `.xls`
+  viejo = `0M8R4KGx`). A veces vienen partidos en varios `.txt` que se concatenan en orden, y un pedazo puede venir
+  cortado: comparar los largos.
 
 ## Próximos pasos (propuestos, sin implementar)
 
@@ -148,16 +172,19 @@ En este orden:
 
 ## Pendientes / preguntas al equipo
 
-1. **Refund record: IMPLEMENTADO con un sample sintético** (doc_type `refund_record`, el CDF como JOIN_KEY, alertas
-   "claimed but NO documents" / "NOT in the refund record", reglas 1, 2, 11, 12 y 13). Falta un export real para
-   confirmar el formato (fila del encabezado, tipos de dato) y preguntar por las filas con montos en 0.
+Respuestas del equipo del 2026-09-29: ver la memoria `project_team_answers_2026_09_29`. Ya implementadas: reglas 3/4
+como INFO, regla 6 = buque + viaje, ítem 26 completo, sin tolerancia, varias facturas por CDF, CDF con varias SO,
+reporte consolidado y refund record real.
+
+1. **Refund record**: el equipo va a mandar UN archivo consolidado (no uno por mes). Falta ver su formato, y si un
+   CDF declarado en varios períodos se suma o vale la última fila.
 2. ¿Qué documentos son obligatorios para un legajo completo? (todos cuentan igual por ahora)
 3. ¿Los ~70 ítems sin regla son solo para registrar, o se cruzan? (ej. LSR No. factura ↔ estado de cuenta, SO)
-4. Equivalencias para las reglas 3 y 6; qué quieren cruzar realmente en la 4. Tolerancias de pesos y montos.
-5. En el refund record: ¿qué significan las filas con montos en 0 y las varias facturas por CDF?
+4. Falta el sample "CDF with multiple SO" (CDF 533820260000000206), que no vino en samples2.
+5. samples2: B/L en formato nuevo, CDF en varias versiones (¿cuál vale?) y la numeración distinta de las carpetas
+   de líquidos (3.6.1, 3.7.1.x, 3.7.2.x) contra el checklist.
 6. ~~Samples de los documentos sin extractor~~: llegaron el 2026-09-28 (reales, de la exportación 13194443) y ya
-   tienen extractor. Falta: el ítem 37 (LSR No. custom declaration de 3.6), que no es una columna del export de SAP,
-   y confirmar si el "Invoice Amount" de las facturas de gastos es el total con IVA (hoy se toma el total).
+   tienen extractor. Falta: el ítem 37 (LSR No. custom declaration de 3.6), que no es una columna del export de SAP.
 7. Cruce natural que no está en rules.xlsx: el total de cada factura de gastos debería igualar el total de su
    estado de cuenta LSR (lo dice el propio estado de cuenta: "invoice total amount matches the LSR total"). Ej.:
    transporte 16 437,20 CNY en los dos.

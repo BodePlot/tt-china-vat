@@ -4,3 +4,8 @@
 /.claude
 /.vscode
 /__pycache__
+samples2/
+# volcados base64 de documentos de la empresa y planillas con macros: datos sensibles
+/*.txt
+!/requirements*.txt
+*.xlsm

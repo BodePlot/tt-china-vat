@@ -198,6 +198,40 @@ def sheet_items(ws) -> list[dict]:
     return boxes
 
 
+def xls_sheet_items(path) -> list[dict]:
+    """
+    Igual que sheet_items() pero para el .xls viejo (Excel 97-2003), que
+    openpyxl no lee: el refund record real que baja el equipo del portal
+    eTAX viene en este formato. Filas/columnas arrancan en 1, como en Excel.
+    """
+    import xlrd
+    ws = xlrd.open_workbook(path).sheet_by_index(0)
+    boxes = []
+    for r in range(ws.nrows):
+        for c in range(ws.ncols):
+            cell = ws.cell(r, c)
+            if cell.ctype in (xlrd.XL_CELL_EMPTY, xlrd.XL_CELL_BLANK):
+                continue
+            v = cell.value
+            if cell.ctype == xlrd.XL_CELL_DATE:
+                v = xlrd.xldate_as_datetime(v, ws.book.datemode)
+            if str(v).strip() == "":
+                continue
+            boxes.append({"text": _cell_text(v), "conf": 1.0, "source": "xlsx",
+                          "x": c + 1, "y": r + 1, "w": 1, "h": 1})
+    return boxes
+
+
+def workbook_items(path) -> list[dict]:
+    """Celdas de la primera hoja, sea .xlsx o .xls."""
+    if Path(path).suffix.lower() == ".xls":
+        return xls_sheet_items(path)
+    wb = openpyxl.load_workbook(path, data_only=True, read_only=True)
+    items = sheet_items(wb.active)
+    wb.close()
+    return items
+
+
 # --- Triage de pagina -------------------------------------------------------
 def triage_page(png_bytes):
     """
@@ -545,7 +579,10 @@ def loc_page_regex(items, spec):
     found = re.findall(spec["regex"], blob)
     if not found:
         return None
-    found = [f if isinstance(f, str) else f[0] for f in found]
+    # varios grupos: 'join' los une (ej. buque + viaje -> 'UN9363405/510S');
+    # sin 'join' vale el primero, como siempre
+    found = [f if isinstance(f, str) else
+             (spec["join"].join(f) if "join" in spec else f[0]) for f in found]
     if spec.get("unique"):
         found = list(dict.fromkeys(found))
     if spec.get("multi"):
@@ -564,7 +601,7 @@ def loc_xlsx_col(items, spec):
     las filas debajo del header, porque cada fila es un registro propio
     (ej. un despacho de camion), no una linea partida de la misma celda.
     """
-    lab = _find_label(items, spec["header"], spec.get("exact", False))
+    lab = _find_header(items, spec)
     if not lab:
         return None
     col = lab["x"]
@@ -588,6 +625,22 @@ def loc_xlsx_col(items, spec):
     if spec.get("multi"):
         return {"value": found, "conf": 1.0}
     return {"value": found[0], "conf": 1.0}
+
+
+def _find_header(items, spec):
+    """
+    Header de una columna de Excel. 'header' puede ser una lista de
+    alternativas: el mismo dato se llama distinto segun el formato del
+    archivo (ej. refund record: "出口金额USD" en la tabla de rules.xlsx,
+    "美元" debajo de "出口销售额" en el export de eTAX). Vale la primera
+    que aparezca.
+    """
+    headers = spec["header"] if isinstance(spec["header"], list) else [spec["header"]]
+    for h in headers:
+        lab = _find_label(items, h, spec.get("exact", False))
+        if lab:
+            return lab
+    return None
 
 
 def loc_table_col(items, spec):
@@ -640,7 +693,22 @@ def to_number(s):
 
 
 def resolve_field(items, spec):
-    """Aplica la estrategia y arma el resultado con estado y confianza."""
+    """
+    Aplica la estrategia y arma el resultado con estado y confianza. Si no
+    encuentra nada y el campo tiene 'fallback' (lista de specs alternativas),
+    prueba con esas en orden: el mismo dato puede vivir en otro lugar segun
+    el formato del archivo (ej. el periodo del refund record: columna en la
+    tabla de rules.xlsx, titulo de la hoja en el export de eTAX).
+    """
+    res = _resolve_one(items, spec)
+    for alt in spec.get("fallback", []):
+        if res["value"] is not None:
+            break
+        res = _resolve_one(items, {**alt, "type": alt.get("type", spec.get("type"))})
+    return res
+
+
+def _resolve_one(items, spec):
     loc = LOCATORS[spec["strategy"]](items, spec)
     if loc is None:
         return {"value": None, "conf": 0.0, "status": "NOT_FOUND"}
@@ -666,7 +734,12 @@ def resolve_field(items, spec):
                     "origin": _origin(loc["lines"])}
 
         sel = spec.get("line", 1)
-        val = lines[0] if sel == 1 else spec.get("join", "").join(lines[1:])
+        if sel == 1:
+            val = lines[0]
+        elif sel == "all":
+            val = spec.get("join", "").join(lines)
+        else:                                    # "2+"
+            val = spec.get("join", "").join(lines[1:])
         if spec.get("strip_prefix"):
             val = re.sub(spec["strip_prefix"], "", val).strip()
         if spec.get("regex"):
@@ -729,9 +802,7 @@ def process_xlsx(path, rules):
     no, un unico record para toda la hoja.
     Sin cache: leer un xlsx no cuesta nada comparado con OCR.
     """
-    wb = openpyxl.load_workbook(path, data_only=True, read_only=True)
-    items = sheet_items(wb.active)
-    wb.close()
+    items = workbook_items(path)
 
     cls = classify(items, rules["doc_types"])
     cfg = rules["doc_types"][cls["type"]] if cls["type"] else {}
@@ -747,6 +818,12 @@ def process_xlsx(path, rules):
     data_rows = sorted({it["y"] for it in items if it["y"] > header_row})
     pages = [_xlsx_record(header + [it for it in items if it["y"] == r], r, cls, cfg)
              for r in data_rows]
+    # row_key: una fila sin ese campo no es un registro. El export de eTAX
+    # viene paginado (titulo, headers, fila de 合计 y "第N页" repetidos en
+    # cada pagina): sin esto, cada repeticion seria un "documento" mas.
+    key = cfg.get("row_key")
+    if key:
+        pages = [p for p in pages if p["fields"].get(key, {}).get("value") is not None]
     return {"file": Path(path).name, "pages": pages}
 
 
@@ -754,7 +831,7 @@ def _xlsx_header_row(items, cfg):
     """Fila de headers = la mas baja donde aparece algun header de xlsx_col."""
     rows = [lab["y"] for spec in cfg.get("fields", {}).values()
             if spec.get("strategy") == "xlsx_col"
-            for lab in [_find_label(items, spec["header"])] if lab]
+            for lab in [_find_header(items, spec)] if lab]
     return max(rows) if rows else None
 
 
@@ -876,7 +953,7 @@ def _pdf_row_records(page, rec, rows_spec):
 
 # las imagenes (ej. 3.4 Bank Receipt como captura PNG) se abren con pymupdf
 # como un documento de una pagina y van por el mismo camino que un escaneo
-PROCESSORS = {".pdf": process_pdf, ".xlsx": process_xlsx,
+PROCESSORS = {".pdf": process_pdf, ".xlsx": process_xlsx, ".xls": process_xlsx,
               ".png": process_pdf, ".jpg": process_pdf, ".jpeg": process_pdf}
 
 
@@ -891,13 +968,11 @@ def duplicate_single_files(folder, rules):
     folder = Path(folder)
     single = {dt for dt, cfg in rules["doc_types"].items() if cfg.get("single_file")}
     found = {}
-    for p in sorted(folder.rglob("*.xlsx")):
-        if p.name.startswith("~$"):
+    for p in sorted(folder.rglob("*")):
+        if p.suffix.lower() not in (".xlsx", ".xls") or p.name.startswith("~$"):
             continue
         try:
-            wb = openpyxl.load_workbook(p, data_only=True, read_only=True)
-            items = sheet_items(wb.active)
-            wb.close()
+            items = workbook_items(p)
         except Exception:
             continue                          # un xlsx roto lo reporta process_folder
         dt = classify(items, rules["doc_types"])["type"]

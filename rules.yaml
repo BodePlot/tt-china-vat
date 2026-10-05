@@ -76,6 +76,16 @@ doc_types:
         label: "运输方式"
         code_from_label: '\((\d+)\)'            # el (2) vive en la etiqueta
 
+      # no es un item de rules.xlsx: lo pidio el equipo (2026-09-29) para la
+      # regla 6, contra el item 42 del B/L. Ej. "UN9363405/510S" (IMO + viaje).
+      # El regex evita agarrar la aduana de la celda de al lado ("(惠州港关)"),
+      # que en el PDF nativo cae debajo y solapada con la etiqueta.
+      fx_conveyance_voyage:
+        desc_zh: "运输工具名称及航次号"         # (conveyance name & voyage no.)
+        strategy: below
+        label: "运输工具名称"
+        regex: '^[A-Z0-9]{4,}\s*/\s*[A-Z0-9]+$'
+
       f16_container_nos:
         desc_zh: "集装箱号"                     # (container numbers)
         strategy: page_regex
@@ -179,6 +189,9 @@ doc_types:
     label_es: "Factura electronica de IVA (fapiao) de exportacion"
     label_zh: "电子发票（普通发票）"
     # 3.3 Export Invoice.pdf -- pagina unica, texto nativo.
+    # multiple: un CDF/SO con varias facturas es frecuente (facturacion en
+    # partes, anulaciones y reemisiones -- confirmado por el equipo).
+    multiple: true
 
     signature:
       required:
@@ -236,14 +249,16 @@ doc_types:
           header_to: "规格型号"
         line: 1
 
+      # la celda entera, como pidio el equipo (2026-09-29): grado + envase,
+      # "PP2232E1 HCC BG 25KGX60". Antes se tomaba solo desde la linea 2.
       f26_spec_model:
-        desc_zh: "规格型号 (packaging)"
+        desc_zh: "规格型号"
         strategy: table_col
         table:
           header_from: "规格型号"
           header_to: "单位"
-        line: "2+"
-        join: ""
+        line: all
+        join: " "
 
       f27_quantity:
         desc_zh: "数量"                         # (quantity)
@@ -375,10 +390,17 @@ doc_types:
         strategy: page_regex
         regex: 'A\d{9,10}'
 
-      f42_means_transport:
-        desc_zh: "vessel/voyage/port of loading"
-        strategy: below
-        label: "Ocean Vessel"
+      # "Conveyance Name & Voyage No." (pedido del equipo, 2026-09-29): la
+      # franja superior, a la izquierda del N° de B/L -- "UN9363405  510S"
+      # (IMO del buque + viaje). Antes era el "Ocean Vessel" del cuerpo
+      # ("HAPPY LUCKY/510S"), que nunca iba a coincidir con el CDF. Se une
+      # con "/" para que quede igual que en el CDF. El \b evita agarrar el
+      # final de un N° de contenedor (MRKU0030781).
+      f42_conveyance_voyage:
+        desc_zh: "Conveyance Name & Voyage No."
+        strategy: page_regex
+        regex: '\b([A-Z]{2}\d{7})\s+([A-Z0-9]+)\b'
+        join: "/"
 
       f43_container_nos:
         desc_zh: "container number(s)"
@@ -551,21 +573,37 @@ doc_types:
   # documentos") + 5 filas armadas con los datos de nuestras exportaciones.
   # Una celda de factura puede traer varias separadas por ';' -- se toma la
   # primera (en los datos reales se repite la misma).
+  # Dos formatos, mismo doc_type (los headers aceptan alternativas):
+  #   - el REAL (samples2/List of Exports.xls, julio 2026): el detalle
+  #     mensual que baja el equipo del portal eTAX despues de declarar,
+  #     生产企业出口货物及修理修配服务免抵退税申报明细表. .xls viejo, paginado
+  #     (titulo/headers/合计 repetidos en cada pagina -> row_key), todo como
+  #     TEXTO con separador de miles, CDF de 21 digitos (18 + item "001"), y
+  #     el periodo solo en el titulo ("所属期：2026年07月").
+  #   - la tabla verde de rules.xlsx (samples/, sintetico): ya reformateada,
+  #     con el periodo como columna.
+  # El equipo va a mandar UN archivo consolidado (no uno por mes): formato
+  # todavia por confirmar.
   refund_record:
     label_es: "Registro de reintegros del fisco (Data Source)"
     label_zh: "出口退税申报记录"
     source_ext: xlsx
     per_row: true
     single_file: true            # ancla del periodo: un solo archivo por carpeta
+    row_key: cdf_no              # filas sin CDF: titulo, headers, 合计 de cada pagina
 
     signature:
       required:
         - "出口货物报关单号"
-        - "退税额CNY"
+        - "出口发票号"
+        - "退税率"
       optional:
         - "征税率"
-        - "退税率"
+        - "出口日期"
         - "出口金额USD"
+        - "退税额CNY"
+        - "免抵退税额"
+        - "出口销售额"
       negative: []
 
     fields:
@@ -573,7 +611,7 @@ doc_types:
         desc_zh: "出口货物报关单号"              # (CDF number)
         strategy: xlsx_col
         header: "出口货物报关单号"
-        regex: '\d{18}'
+        regex: '\d{18}'                         # sin el "001" del export de eTAX
 
       vat_invoice_no:
         desc_zh: "出口发票号"                    # (VAT invoice number)
@@ -585,6 +623,8 @@ doc_types:
         desc_zh: "退税所属期"
         strategy: xlsx_col
         header: "退税所属期"
+        fallback:                               # eTAX: "所属期：2026年07月" -> 202607
+          - {strategy: page_regex, regex: '所属期[：:]\s*(\d{4})年(\d{1,2})月', join: ""}
 
       export_date:
         desc_zh: "出口日期"
@@ -606,25 +646,26 @@ doc_types:
       quantity_kg:
         desc_zh: "出口数量KG"
         strategy: xlsx_col
-        header: "出口数量KG"
+        header: "出口数量"                      # "出口数量KG" en la tabla verde
         type: number
 
+      # eTAX: "出口销售额" ocupa dos columnas, con "美元" / "人民币" debajo
       amount_usd:
         desc_zh: "出口金额USD"
         strategy: xlsx_col
-        header: "出口金额USD"
+        header: ["出口金额USD", "美元"]
         type: number
 
       amount_cny:
         desc_zh: "出口金额CNY"
         strategy: xlsx_col
-        header: "出口金额CNY"
+        header: ["出口金额CNY", "人民币"]
         type: number
 
       vat_refunded:
         desc_zh: "退税额CNY"
         strategy: xlsx_col
-        header: "退税额CNY"
+        header: ["退税额CNY", "免抵退税额"]
         type: number
 
   # ---------------------------------------------------------------------------

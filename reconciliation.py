@@ -11,12 +11,12 @@ Lo que un documento por si solo NO puede resolver:
   3. Cuando NO corresponde comparar: campo no encontrado, confianza baja, o
      directamente sin extractor todavia (ver _resolver_pata()).
 
-Devuelve, por embarque y por regla, uno de tres veredictos -- los mismos que
-ya estaban escritos en el tab "Reconciliación" de gui.py:
+Devuelve, por embarque y por regla, uno de cuatro veredictos:
   VERIFIED         -> al menos 2 patas confiables y todas coinciden
   DISCREPANCY      -> al menos 2 patas confiables y no coinciden
   NOT_VERIFIABLE   -> menos de 2 patas confiables (falta doc, NOT_FOUND,
                      confianza baja, o el campo tiene precision perdida)
+  INFO             -> regla con check: false, solo muestra los datos
 """
 
 import re
@@ -28,8 +28,10 @@ import yaml
 HERE = Path(__file__).resolve().parent
 
 CONF_THRESHOLD = 0.85          # mismo umbral que CONF_THRESHOLD en gui.py
-NUMERIC_ABS_TOL = 0.01
-NUMERIC_REL_TOL = 0.001
+# Sin tolerancia (pedido del equipo, 2026-09-29): montos y pesos tienen que
+# coincidir exacto. El medio centavo solo absorbe el ruido del float.
+NUMERIC_ABS_TOL = 0.005
+NUMERIC_REL_TOL = 0.0
 
 
 # --- Claves de correlacion ---------------------------------------------------
@@ -235,9 +237,10 @@ def _field_kind(spec, sub):
 def _resolver_pata(cluster, doc_types, item):
     """
     Busca el valor de un leg de regla dentro del cluster. Devuelve un dict
-    con status "OK" | "MISSING" | "LOW_CONF" | "LOSSY" y el valor (si hay).
-    LOSSY es para campos marcados con nota de precision perdida en
-    reconciliation.yaml -- se muestran pero no deciden el veredicto.
+    con status "OK" | "MISSING" | "LOW_CONF" | "LOSSY" | "MULTI" y el valor
+    (si hay). LOSSY es para campos marcados con nota de precision perdida en
+    reconciliation.yaml -- se muestran pero no deciden el veredicto. MULTI:
+    varios documentos con numeros distintos, ver _combine_legs().
     """
     if item.get("ref") is None:
         return {"status": "MISSING", "value": None, "item": item.get("item"),
@@ -251,11 +254,45 @@ def _resolver_pata(cluster, doc_types, item):
         return {"status": "MISSING", "value": None, "item": item.get("item"),
                 "ref": item["ref"], "note": "documento no presente en este embarque"}
 
-    f = recs[0]["fields"][field]
     if len(recs) > 1 and _field_spec(doc_types, item["ref"])[0].get("multi"):
         # varias filas de un log per_row (ej. un camion por contenedor en
         # shipping_order): la lista del embarque es la union de todas
-        f = _merge_list_fields([r["fields"][field] for r in recs])
+        return _leg_from_field(_merge_list_fields([r["fields"][field] for r in recs]),
+                               item, doc_types, sub)
+    if len(recs) > 1:
+        return _combine_legs([_leg_from_field(r["fields"][field], item, doc_types, sub)
+                              for r in recs])
+    return _leg_from_field(recs[0]["fields"][field], item, doc_types, sub)
+
+
+def _combine_legs(legs):
+    """
+    Varios documentos del mismo tipo en un embarque (ej. un CDF con varias
+    facturas, filas del mismo CDF en varios periodos del refund record,
+    versiones corregidas del CDF). Si dicen lo mismo, es un solo valor. Si
+    no: los IDs se juntan en una lista (la regla pasa si alguno coincide);
+    los numeros NO se suman ni se elige uno -- queda MULTI y se revisa a
+    mano, porque no se sabe si son partes de un total o versiones del mismo
+    documento.
+    """
+    usable = [leg for leg in legs if leg["status"] in ("OK", "LOW_CONF", "LOSSY")]
+    if not usable:
+        return legs[0]
+    kind = usable[0].get("kind", "text")
+    distinct = list(dict.fromkeys(_normalize_id(v) for leg in usable
+                                  for v in _as_list(leg["value"])))
+    best = next((leg for leg in usable if leg["status"] == "OK"), usable[0])
+    if len(distinct) <= 1:
+        return best
+    note = f"{len(distinct)} different values in {len(legs)} documents"
+    if kind == "number":
+        return {**best, "status": "MULTI", "value": distinct,
+                "note": note + " -- not compared, check by hand"}
+    worst = "OK" if all(leg["status"] == "OK" for leg in usable) else "LOW_CONF"
+    return {**best, "status": worst, "kind": "list", "value": distinct, "note": note}
+
+
+def _leg_from_field(f, item, doc_types, sub):
     val = f["value"]
     if sub:
         # una correccion manual (Revision tab) guarda lo que el analista
@@ -314,12 +351,18 @@ def _numbers_close(a, b):
     return abs(a - b) <= max(NUMERIC_ABS_TOL, NUMERIC_REL_TOL * max(abs(a), abs(b)))
 
 
-def _values_equal(a, b, kind):
+def _alnum(v):
+    """'UN9363405  510S' y 'UN9363405/510S' -> 'UN9363405510S'."""
+    return re.sub(r"[^0-9A-Za-z]", "", _normalize_id(v) or "").upper() or None
+
+
+def _values_equal(a, b, kind, compare=None):
+    norm = _alnum if compare == "alnum" else _normalize_id
     if kind == "list":
-        return bool(set(map(str, _as_list(a))) & set(map(str, _as_list(b))))
+        return bool(set(map(norm, _as_list(a))) & set(map(norm, _as_list(b))))
     if kind == "number":
         return _numbers_close(a, b)
-    return _normalize_id(a) == _normalize_id(b)
+    return norm(a) == norm(b)
 
 
 def evaluate_rule(cluster, rule, doc_types):
@@ -332,21 +375,28 @@ def evaluate_rule(cluster, rule, doc_types):
     if rule.get("verifiable") is False:
         return {"id": rule["id"], "desc": rule["desc"].strip(),
                 "verdict": "NOT_VERIFIABLE", "legs": legs}
+    # check: false -> el equipo quiere ver los datos, no que se comparen
+    if rule.get("check") is False:
+        return {"id": rule["id"], "desc": rule["desc"].strip(),
+                "verdict": "INFO", "legs": legs}
 
-    verdict = _verdict(legs)
+    verdict = _verdict(legs, rule.get("compare"))
     return {"id": rule["id"], "desc": rule["desc"].strip(), "verdict": verdict,
             "legs": legs}
 
 
-def _agree(legs):
+def _agree(legs, compare=None):
     """True si TODAS las patas dadas tienen el mismo valor (>=2 patas)."""
-    kind = legs[0].get("kind", "text")
+    kinds = {leg.get("kind", "text") for leg in legs}
+    # una pata con varios valores (varias facturas del mismo CDF) se compara
+    # por superposicion con el resto
+    kind = "list" if "list" in kinds else legs[0].get("kind", "text")
     base = _convert(legs[0]["value"], legs[0].get("unit"))
-    return all(_values_equal(base, _convert(leg["value"], leg.get("unit")), kind)
+    return all(_values_equal(base, _convert(leg["value"], leg.get("unit")), kind, compare)
               for leg in legs[1:])
 
 
-def _verdict(legs):
+def _verdict(legs, compare=None):
     """
     Un valor de baja confianza (LOW_CONF/LOSSY) que IGUAL coincide con otro
     es evidencia a favor, no en contra -- dos lecturas independientes de
@@ -361,13 +411,13 @@ def _verdict(legs):
     if len(comparable) < 2:
         return "NOT_VERIFIABLE"
 
-    if _agree(comparable):
+    if _agree(comparable, compare):
         return "VERIFIED"
 
     ok_legs = [leg for leg in comparable if leg["status"] == "OK"]
     if len(ok_legs) < 2:
         return "NOT_VERIFIABLE"          # no hay confianza suficiente para acusar
-    return "VERIFIED" if _agree(ok_legs) else "DISCREPANCY"
+    return "VERIFIED" if _agree(ok_legs, compare) else "DISCREPANCY"
 
 
 def _only_logs(cluster, doc_types):
@@ -446,7 +496,14 @@ def _warnings(cluster, checklist, doc_types, claims_loaded):
     elif claims_loaded and not _claimed(cluster):
         out.append("has documents but is NOT in the refund record (not claimed?)")
     sos = sorted({v for rec in cluster for v in _key_values(rec, "so")})
-    if len(sos) > 1:
+    cdfs = sorted({v for rec in cluster for v in _key_values(rec, "cdf")})
+    if len(sos) > 1 and len(cdfs) == 1:
+        # el equipo confirmo que un CDF puede cubrir varias SO (ej. CDF
+        # 533820260000000206 -> SO 6735473 y 6747061): no es un error de
+        # agrupado, pero se muestra para que se vea
+        out.append(f"one CDF ({cdfs[0]}) covers {len(sos)} SOs ({', '.join(sos)}) -- "
+                   "valid case, shown for information")
+    elif len(sos) > 1:
         out.append(f"mixes {len(sos)} different SOs ({', '.join(sos)}) -- "
                    "check that these documents belong to the same shipment")
     # single_file: lo cubre folder_warnings(); multiple: es normal que haya

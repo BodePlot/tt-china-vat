@@ -46,26 +46,24 @@ rules:
       - {item: 21, ref: export_invoice.f21_invoice_no}
       - {item: 2, ref: refund_record.vat_invoice_no}
 
+  # check: false -> regla solo para MOSTRAR los datos lado a lado (veredicto
+  # INFO), sin compararlos. Pedido del equipo (2026-09-29) para las 3 y 4.
   - id: 3
     desc: >
-      Product name: CDF == VAT invoice. Verified by hand against samples/:
-      the CDF reads "均聚聚丙烯" (technical name) and the invoice
-      "*化学合成材料*聚丙烯" (fapiao tax category + generic name) -- they're
-      the same product but will NEVER be the same text, neither one is
-      misread. Not verifiable by exact equality.
-    verifiable: false
+      Product name: CDF and VAT invoice, shown side by side, not checked
+      (team's decision). The CDF reads the technical name ("均聚聚丙烯"),
+      the invoice the fapiao category + generic name ("*化学合成材料*聚丙烯").
+    check: false
     fields:
       - {item: 12, ref: customs_declaration.f12_commodity_name}
       - {item: 25, ref: export_invoice.f25_product_name}
 
   - id: 4
     desc: >
-      Product type: CDF == VAT invoice. Verified by hand: the CDF field is
-      the CHEMICAL spec ("4|1|白色颗粒状...丙烯100%..."), the invoice's is
-      the PACKAGING format ("BG 25KGX60") -- two different pieces of data
-      that the checklist groups under the same item, not the same
-      information. Not verifiable by exact equality.
-    verifiable: false
+      Product type: CDF and VAT invoice, shown side by side, not checked
+      (team's decision). The CDF has the chemical spec ("4|1|白色颗粒状..."),
+      the invoice the grade + packaging ("PP2232E1 HCC BG 25KGX60").
+    check: false
     fields:
       - {item: 13, ref: customs_declaration.f13_specification}
       - {item: 26, ref: export_invoice.f26_spec_model}
@@ -76,17 +74,18 @@ rules:
       - {item: 14, ref: customs_declaration.f14_bl_no}
       - {item: 41, ref: bill_of_lading.f41_bl_no}
 
+  # Redefinida por el equipo (2026-09-29): antes cruzaba la modalidad del CDF
+  # ("水路运输") con el buque del B/L, que nunca iban a coincidir. Ahora es
+  # buque + viaje en los dos. El campo del CDF no es un item de rules.xlsx.
+  # compare: alnum -> se ignoran espacios y "/" (el B/L trae
+  # "UN9363405  510S", el CDF "UN9363405/510S").
   - id: 6
-    desc: >
-      Mode of transport: CDF == Bill of Lading. Verified by hand: the CDF
-      stores the modality CODE ("水路运输" = water transport), the B/L
-      stores vessel+voyage+port ("HAPPY LUCKY/510S YANTIAN") -- they will
-      never match as text even if both are read correctly. Not verifiable
-      by exact equality.
-    verifiable: false
+    desc: "Conveyance name & voyage no.: CDF == Bill of Lading"
+    compare: alnum
     fields:
-      - {item: 15, ref: customs_declaration.f15_transport_mode}
-      - {item: 42, ref: bill_of_lading.f42_means_transport}
+      - {item: null, ref: customs_declaration.fx_conveyance_voyage,
+         note: "运输工具名称及航次号 -- added at the team's request, not in rules.xlsx"}
+      - {item: 42, ref: bill_of_lading.f42_conveyance_voyage}
 
   - id: 7
     desc: >
@@ -107,6 +106,9 @@ rules:
       - {item: 17, ref: customs_declaration.f17_contract_no}
       - {item: 22, ref: export_invoice.f22_contract_no}
 
+  # Pesos y montos (9-12): SIN tolerancia, por pedido del equipo
+  # (2026-09-29) -- tienen que coincidir al centavo / al kilo. Las
+  # diferencias las revisan ellos caso por caso.
   - id: 9
     desc: >
       Net weight (CDF, kilograms) == quantity (VAT invoice, tons). Same

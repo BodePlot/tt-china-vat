@@ -3,6 +3,7 @@ Salida separada por embarque: una carpeta por exportacion con copia de sus
 documentos y un reporte Excel (resumen, checklist, reconciliacion y datos
 extraidos).
 
+    output/exports/<fecha_hora>/consolidated_report.xlsx   (todas las exportaciones)
     output/exports/<fecha_hora>/<SO>/documents/...
     output/exports/<fecha_hora>/<SO>/<SO>_report.xlsx
     output/exports/<fecha_hora>/_unassigned/...      (si hay paginas sin asignar)
@@ -36,8 +37,10 @@ STATUS_COLORS = {
     "MISSING": ("FEF2F2", "991B1B"), "DISCREPANCY": ("FEF2F2", "991B1B"),
     "NOT_FOUND": ("FEF2F2", "991B1B"), "CONFLICT": ("FEF2F2", "991B1B"),
     "MANUAL": ("FFEDD5", "C2410C"), "NOT_VERIFIABLE": ("FFEDD5", "C2410C"),
-    "PARTIAL": ("FFEDD5", "C2410C"),
+    "PARTIAL": ("FFEDD5", "C2410C"), "MULTI": ("FFEDD5", "C2410C"),
+    "INFO": ("F1F5F9", "475569"),
 }
+CONSOLIDATED_NAME = "consolidated_report.xlsx"
 
 
 def _safe_name(text, limit=60):
@@ -121,6 +124,7 @@ def write_report(path, shipment, source_folder, pages_by_key, log_files,
         ["Rules verified", count(shipment["rules"], "verdict", "VERIFIED")],
         ["Rules with discrepancy", count(shipment["rules"], "verdict", "DISCREPANCY")],
         ["Rules not verifiable", count(shipment["rules"], "verdict", "NOT_VERIFIABLE")],
+        ["Rules shown for information", count(shipment["rules"], "verdict", "INFO")],
         ["Warnings", "\n".join(shipment["warnings"]) or "none"],
         ["Folder warnings", "\n".join(folder_warnings) or "none"],
         ["Shared logs (not copied)",
@@ -139,6 +143,98 @@ def write_report(path, shipment, source_folder, pages_by_key, log_files,
            ["File", "Page / row", "Document type", "Field", "Value", "Confidence", "Status"],
            _field_rows(shipment["records"], pages_by_key),
            (34, 10, 24, 24, 46, 11, 18), status_col=6)
+    wb.save(path)
+
+
+def _claim_values(shipment, pages_by_key, field):
+    """Valores de un campo del refund record en las filas de este embarque."""
+    vals = []
+    for rec in shipment["records"]:
+        if rec["doc_type"] != "refund_record":
+            continue
+        page = pages_by_key.get((rec["file"], rec["page"]))
+        v = page and page["fields"].get(field, {}).get("value")
+        if isinstance(v, float):
+            v = round(v, 2)                    # 70231.04999999999 -> 70231.05
+        if v is not None and v not in vals:
+            vals.append(v)
+    # un solo valor va como numero (Excel lo puede sumar); varios, como texto
+    return vals[0] if len(vals) == 1 else _fmt(vals)
+
+
+def _no_documents(shipment):
+    """Exportacion que solo esta en el refund record, sin ningun documento."""
+    return all(rec["doc_type"] == "refund_record" for rec in shipment["records"])
+
+
+def write_consolidated(path, shipments, source_folder, pages_by_key,
+                       unassigned=(), folder_warnings=()):
+    """
+    Todas las exportaciones en un solo Excel (pedido del equipo de China,
+    2026-09-29), para no tener que abrir el reporte de cada una:
+      Overview        -> una fila por exportacion: lo reclamado, cuantos
+                         documentos faltan, cuantas reglas fallan, avisos
+      Discrepancies   -> solo las reglas con DISCREPANCY, con el detalle
+      Missing docs    -> solo los documentos MISSING
+      All rules       -> todas las reglas de todas las exportaciones
+    El detalle de cada una sigue en su carpeta (<SO>_report.xlsx).
+    """
+    count = lambda items, key, val: sum(1 for i in items if i[key] == val)
+    overview = []
+    for s in shipments:
+        ck, rules = s["checklist"], s["rules"]
+        overview.append([
+            s["shipment"],
+            _claim_values(s, pages_by_key, "cdf_no"),
+            _claim_values(s, pages_by_key, "refund_period"),
+            _claim_values(s, pages_by_key, "amount_usd"),
+            _claim_values(s, pages_by_key, "vat_refunded"),
+            count(ck, "status", "PRESENT"), count(ck, "status", "MISSING"),
+            ", ".join(i["code"] for i in ck if i["status"] == "MISSING"),
+            count(rules, "verdict", "VERIFIED"), count(rules, "verdict", "DISCREPANCY"),
+            ", ".join(str(r["id"]) for r in rules if r["verdict"] == "DISCREPANCY"),
+            count(rules, "verdict", "NOT_VERIFIABLE"),
+            "\n".join(s["warnings"]),
+        ])
+    wb = Workbook()
+    ws = _sheet(wb, "Overview",
+                ["Shipment", "CDF (refund record)", "Refund period", "USD (refund record)",
+                 "VAT refunded CNY", "Docs present", "Docs missing", "Missing codes",
+                 "Rules verified", "Discrepancies", "Discrepancy rules",
+                 "Not verifiable", "Warnings"],
+                overview, (22, 22, 12, 16, 16, 10, 10, 24, 10, 12, 14, 12, 70), first=True)
+    # una exportacion con discrepancias o documentos faltantes en rojo
+    for row in ws.iter_rows(min_row=2):
+        if row[9].value or row[6].value:
+            for cell in row:
+                cell.fill = PatternFill("solid", fgColor=STATUS_COLORS["DISCREPANCY"][0])
+                cell.font = Font(color=STATUS_COLORS["DISCREPANCY"][1])
+    _sheet(wb, "Discrepancies", ["Shipment", "Rule", "Description", "Detail"],
+           [[s["shipment"], r["id"], r["desc"], "\n".join(_leg(l) for l in r["legs"])]
+            for s in shipments for r in s["rules"] if r["verdict"] == "DISCREPANCY"],
+           (22, 6, 60, 80))
+    # una exportacion sin NINGUN documento va en una sola fila, no 16
+    missing = []
+    for s in shipments:
+        if _no_documents(s):
+            missing.append([s["shipment"], "ALL", "claimed in the refund record, "
+                                                  "no documents found in the folder"])
+            continue
+        missing += [[s["shipment"], i["code"], i["name"]]
+                    for i in s["checklist"] if i["status"] == "MISSING"]
+    _sheet(wb, "Missing docs", ["Shipment", "Code", "Document"], missing, (22, 10, 70))
+    _sheet(wb, "All rules", ["Shipment", "Rule", "Description", "Verdict", "Detail"],
+           [[s["shipment"], r["id"], r["desc"], r["verdict"],
+             "\n".join(_leg(l) for l in r["legs"])]
+            for s in shipments for r in s["rules"]],
+           (22, 6, 60, 16, 80), status_col=3)
+    _sheet(wb, "Run info", ["Item", "Value"], [
+        ["Generated", datetime.now().strftime("%Y-%m-%d %H:%M")],
+        ["Source folder", str(source_folder)],
+        ["Shipments", len(shipments)],
+        ["Unassigned pages", len(unassigned)],
+        ["Folder warnings", "\n".join(folder_warnings) or "none"],
+    ], (24, 90))
     wb.save(path)
 
 
@@ -177,6 +273,8 @@ def export_by_shipment(results, recon, doc_types, source_folder, dest_root=None)
         write_report(d / f"{_safe_name(s['shipment'])}_report.xlsx", s,
                      source_folder, pages_by_key, logs,
                      recon.get("folder_warnings", ()))
+    write_consolidated(run_dir / CONSOLIDATED_NAME, recon["shipments"], source_folder,
+                       pages_by_key, recon["unassigned"], recon.get("folder_warnings", ()))
 
     if recon["unassigned"]:
         d = run_dir / UNASSIGNED_DIR
@@ -208,4 +306,7 @@ if __name__ == "__main__":
     out = export_by_shipment(results, recon, rules_yaml["doc_types"], folder)
     print(f"\nSalida por embarque: {out}")
     for p in sorted(out.iterdir()):
-        print(f"  {p.name}/  ({len(list((p / 'documents').glob('*')))} documentos)")
+        if p.is_dir():
+            print(f"  {p.name}/  ({len(list((p / 'documents').glob('*')))} documentos)")
+        else:
+            print(f"  {p.name}")

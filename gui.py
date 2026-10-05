@@ -250,7 +250,7 @@ def _sources_text(sources):
         by_file.setdefault(s["file"], []).append(s["page"])
     parts = []
     for f, pages in by_file.items():
-        unit = ("row" if len(pages) == 1 else "rows") if f.lower().endswith(".xlsx") else "p."
+        unit = ("row" if len(pages) == 1 else "rows") if f.lower().endswith((".xlsx", ".xls")) else "p."
         parts.append(f"{f} ({unit} {', '.join(map(str, sorted(pages)))})")
     return "   |   ".join(parts)
 
@@ -467,12 +467,14 @@ def tab_reconciliation():
          sg.Text("   DISCREPANCY — the values differ, with certainty",
                  text_color=C["bad"]),
          sg.Text("   NOT_VERIFIABLE — a document is missing or the reading isn't reliable",
-                 text_color=C["warn"])],
+                 text_color=C["warn"]),
+         sg.Text("   INFO — shown side by side, not checked",
+                 text_color=C["muted"])],
         [sg.Text("Shipment"),
          sg.Combo(["All"], default_value="All", readonly=True,
                   key="-RECON_FILTER-", enable_events=True, size=(20, 1)),
          sg.Text("Verdict"),
-         sg.Combo(["All", "VERIFIED", "DISCREPANCY", "NOT_VERIFIABLE"],
+         sg.Combo(["All", "VERIFIED", "DISCREPANCY", "NOT_VERIFIABLE", "INFO"],
                   default_value="All", readonly=True,
                   key="-RECON_VERDICT-", enable_events=True, size=(18, 1))],
         # sin scroll horizontal: Description/Detail ya vienen recortadas al
@@ -655,6 +657,7 @@ def main():
         colors = [(i, *reversed({"VERIFIED": ("#F0FDF4", "#166534"),
                                  "DISCREPANCY": ("#FEF2F2", "#991B1B"),
                                  "NOT_VERIFIABLE": ("#FFEDD5", "#C2410C"),
+                                 "INFO": ("#F1F5F9", "#475569"),
                                  }[r[3]])) for i, r in enumerate(shown)]
         win["-RECON_TABLE-"].update(values=[_truncate_recon_row(r) for r in shown],
                                     row_colors=colors)
