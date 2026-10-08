@@ -82,6 +82,9 @@ Siempre con `venv/Scripts/python.exe`. `xlrd` (en el venv) lee los `.xls` viejos
    - `amount_usd`: el 3.4 (aviso de crédito del banco) no trae SO ni CDF. Se adjunta solo si su monto coincide con
      el USD de **una** exportación (del refund record o de la factura). Si coincide con varias, queda "unassigned"
      con el motivo. En los samples coincide con las 5, porque las sintéticas copian los montos.
+     **Con datos reales esto no sirve**: el comprobante real es un pago de la empresa de Singapur (EXTAP 4453 o
+     EMCAP 1796) que salda MUCHAS ventas juntas (USD 9 a 36 millones contra exportaciones de miles). Ver
+     "Comprobante del banco y SAP" más abajo.
    - Los **estados de cuenta LSR** (3.7.4.2, 3.7.5.2, 3.8.2.2) son PDFs mensuales con filas de todas las SO del mes:
      `rows:` en rules.yaml los lee fila por fila (`extract._pdf_row_records`, page = pág*100+fila) y cada fila se une
      por su SO, como un log `per_row`.
@@ -138,7 +141,32 @@ Siempre con `venv/Scripts/python.exe`. `xlrd` (en el venv) lee los `.xls` viejos
   manifiesto, 3.7.1.x contrato Sinotrans, 3.7.2.x despachante). Varias versiones del CDF (`已修改价格` / `已修改数量`)
   → sus números van a dar MULTI. Fapiao y B/L escaneados sin texto.
 - `3.7.4.3 26年1月出运单.xls` (Shipping Order de enero, se clasifica bien) y `370041183 03092026 9167479.70.pdf`
-  (parece un cobro bancario, escaneado).
+  (comprobante de Bank of America del 09/03/2026 por USD 9.167.479,70: un pago de Singapur que cubre muchas ventas).
+- `CDF with multiple SO 533820260000000206/` (llegó el 2026-10-07): MTBE, un solo embarque (barco ZHONG CHUAN 701)
+  vendido en 2 SO al mismo cliente y precio: 6735473 (28.823 barriles) y 6747061 (13.378 barriles). **El CDF solo
+  menciona la 6735473**; la otra aparece solo en su factura de precio final. 23 archivos: 4 versiones del CDF, pedidos
+  de corrección del CDF y ~15 documentos de mercadería peligrosa/inspección que NO están en rules.xlsx.
+- `Documentation checking step.xlsx` (llegó el 2026-10-08): el Excel de 4 pestañas del equipo. A = los 15 pasos (ya
+  conocidos); B = rules.xlsx + 8 filas de refund record para las exportaciones de samples2; C = cómo unen el
+  comprobante del banco con la venta en SAP (ver abajo); D = acceso al sistema de aduana HST, **con credenciales:
+  no copiar a ningún lado** (se le pidió al equipo cambiar la contraseña).
+- Los PP de enero: CDF 530420260000153364 (SO 13349718) y 530420260000170868 (SO 13368987). La carpeta de la
+  13368987 tiene **la factura de la 13349718** (mismo archivo); le correspondería la 26442000001307369596.
+- Los líquidos de julio: CDF 533820260000000256 (SO 6755067) y 533820260000000293 (SO 6759315).
+
+### Comprobante del banco y SAP (pestaña C del Excel de 4 pestañas)
+
+Un comprobante NO es el pago de una venta. Cadena en SAP (transacción FBL3N; "broche" = número de compensación):
+1. Cuentas 250052106 (EXTAP 4453) y 250052107 (EMCAP 1796): cada venta es un asiento #56 con el billing number
+   (el `INV#` de la factura VAT) en "Reference". Al cobrarse queda abrochada con un #16.
+2. Mismo broche #16 → asiento de cobro #10 (texto "收款1796" / "收款4453"). Un cobro cancela muchas ventas.
+3. Cuenta 917009505 (banco): el #10 abrochado (#11) con las transferencias reales #37 (puede haber varias).
+4. Cada #37 trae fecha, monto y, en el texto, el **Customer Reference Number** que también figura en el comprobante
+   de Bank of America → clave exacta para encontrar el PDF.
+Ejemplo de sus capturas: billing 9005652839 (CNY 296.407,16 = CDF …525751) → cobro 100002019 (31/07) →
+transferencia del 22/07 por USD 35.946.624,17 (Customer Ref 17962000112646).
+Para automatizarlo hace falta un **export de FBL3N de esas 3 cuentas** (fecha, N° de asiento, referencia,
+compensación, monto, tipo, texto). Un comprobante va a quedar en muchas exportaciones, como las facturas mensuales.
 
 ## Trampas conocidas
 
@@ -180,9 +208,15 @@ reporte consolidado y refund record real.
    CDF declarado en varios períodos se suma o vale la última fila.
 2. ¿Qué documentos son obligatorios para un legajo completo? (todos cuentan igual por ahora)
 3. ¿Los ~70 ítems sin regla son solo para registrar, o se cruzan? (ej. LSR No. factura ↔ estado de cuenta, SO)
-4. Falta el sample "CDF with multiple SO" (CDF 533820260000000206), que no vino en samples2.
-5. samples2: B/L en formato nuevo, CDF en varias versiones (¿cuál vale?) y la numeración distinta de las carpetas
-   de líquidos (3.6.1, 3.7.1.x, 3.7.2.x) contra el checklist.
+4. ~~Sample "CDF with multiple SO"~~: llegó el 2026-10-07. Falta confirmar si las 2 SO se suman contra el CDF.
+5. samples2: el B/L de PP es el mismo documento impreso sin el formulario (¿pueden bajar siempre la versión
+   completa?), CDF en varias versiones (¿cuál vale?) y la numeración distinta de las carpetas de líquidos (3.6.1,
+   3.7.1.x, 3.7.2.x) contra el checklist.
+8. **Alcance = rules.xlsx**: proponer al equipo que lo que no esté ahí (documentos de mercadería peligrosa,
+   inspección, pedidos de corrección) se liste como "otros" y no se analice; y que digan qué variantes reales hay de
+   cada documento del checklist.
+9. **Pedir el export de SAP (FBL3N)** de las cuentas 250052106, 250052107 y 917009505 para unir el 3.4 con certeza.
+10. Avisar que la carpeta de la SO 13368987 trae la factura equivocada, y que cambien la contraseña de HST.
 6. ~~Samples de los documentos sin extractor~~: llegaron el 2026-09-28 (reales, de la exportación 13194443) y ya
    tienen extractor. Falta: el ítem 37 (LSR No. custom declaration de 3.6), que no es una columna del export de SAP.
 7. Cruce natural que no está en rules.xlsx: el total de cada factura de gastos debería igualar el total de su
