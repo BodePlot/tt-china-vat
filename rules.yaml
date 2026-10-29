@@ -86,6 +86,15 @@ doc_types:
         label: "运输工具名称"
         regex: '^[A-Z0-9]{4,}\s*/\s*[A-Z0-9]+$'
 
+      # no es un item de rules.xlsx: separa liquidos de solidos. "散装" (granel)
+      # en los liquidos de samples2/, "包/袋" (bolsas) en los PP. No se usan
+      # los contenedores para eso: el CDF corta la lista ("详见集装箱附加页").
+      fx_packing_type:
+        desc_zh: "包装种类"                     # (packing type)
+        strategy: below
+        label: "包装种类"
+        code_from_label: '\((\d+)\)'            # el (06) vive en la etiqueta
+
       f16_container_nos:
         desc_zh: "集装箱号"                     # (container numbers)
         strategy: page_regex

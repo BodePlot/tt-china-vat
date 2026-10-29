@@ -9,3 +9,4 @@ samples2/
 /*.txt
 !/requirements*.txt
 *.xlsm
+/macros_vba/

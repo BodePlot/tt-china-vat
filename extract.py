@@ -46,7 +46,7 @@ KNOWN_BOILERPLATE_PAGES = {
 # OCR completo en cada corrida aunque los documentos sean siempre los mismos.
 CACHE_ENABLED = True
 CACHE_DIR = Path(__file__).resolve().parent / "output" / "ocr_cache"
-CACHE_VERSION = 1
+CACHE_VERSION = 2               # 2: texto nativo en el marco visible (pag. giradas)
 
 _ocr_engine = None
 
@@ -111,7 +111,11 @@ def page_items(page) -> list[dict]:
         for line in blk.get("lines", []):
             txt = "".join(sp["text"] for sp in line.get("spans", []))
             if txt.strip():
-                x0, y0, x1, y1 = line["bbox"]
+                # get_text() da coordenadas SIN el /Rotate de la pagina (los CDF
+                # de samples2/ vienen con 90): sin pasarlas al marco visible,
+                # "abajo de la etiqueta" queda al costado y below/right/table_col
+                # no encuentran nada
+                x0, y0, x1, y1 = pymupdf.Rect(line["bbox"]) * page.rotation_matrix
                 boxes.append({"text": txt, "conf": 1.0, "source": "native",
                               "x": x0, "y": y0, "w": x1 - x0, "h": y1 - y0})
     if len(boxes) >= 5:                      # el PDF tenia texto real
