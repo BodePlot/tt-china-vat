@@ -41,6 +41,9 @@ doc_types:
         label: "海关编号"
         sep: "："
         regex: '\d{18}'
+        # en los CDF con texto nativo el numero es una caja aparte, a la derecha
+        fallback:
+          - {strategy: right, label: "海关编号", regex: '\d{18}'}
         # se repite en el codigo de barras y en 预录入编号 -> se usa para validar
         corroborate:
           - {strategy: page_regex, regex: '\*(\d{18})\*'}
@@ -86,14 +89,14 @@ doc_types:
         label: "运输工具名称"
         regex: '^[A-Z0-9]{4,}\s*/\s*[A-Z0-9]+$'
 
-      # no es un item de rules.xlsx: separa liquidos de solidos. "散装" (granel)
-      # en los liquidos de samples2/, "包/袋" (bolsas) en los PP. No se usan
+      # no es un item de rules.xlsx: separa liquidos de solidos, criterio
+      # confirmado por el equipo (ver reconciliation.shipment_kind). No se usan
       # los contenedores para eso: el CDF corta la lista ("详见集装箱附加页").
       fx_packing_type:
         desc_zh: "包装种类"                     # (packing type)
         strategy: below
         label: "包装种类"
-        code_from_label: '\((\d+)\)'            # el (06) vive en la etiqueta
+        code_from_label: '\(([\d/]+)\)'         # el (06/93) vive en la etiqueta
 
       f16_container_nos:
         desc_zh: "集装箱号"                     # (container numbers)
@@ -202,12 +205,14 @@ doc_types:
     # partes, anulaciones y reemisiones -- confirmado por el equipo).
     multiple: true
 
+    # no se pide "电子发票": en las facturas escaneadas de samples2/ el sello tapa
+    # el titulo y el OCR lee "电子发" y "普通发票)"
     signature:
       required:
-        - "电子发票"
         - "发票号码"
-      optional:
         - "开票日期"
+      optional:
+        - "电子发票"
         - "价税合计"
         - "统一社会信用代码"
       negative:
@@ -298,24 +303,38 @@ doc_types:
     label_es: "Contrato de venta"
     label_zh: "销售合同"
 
+    # no se pide "销售合同": en los liquidos de samples2/ el titulo es solo "合同"
+    # (y 采购合同), y en cambio la palabra aparece en parrafos de otros documentos
+    # (terminos y condiciones, acuerdo de suministro, contrato con Sinotrans)
     signature:
       required:
-        - "销售合同"
-      optional:
         - "合同号"
         - "成交方式"
+      optional:
+        - "销售合同"
         - "物料号"
       negative:
         - "商业发票"
+        - "临时发票"                     # factura provisoria: mismo encabezado que el contrato
         - "装箱单"
 
     fields:
+
+      # "票据编号": la referencia que el B/L de liquidos trae como Customer
+      # reference number. Solo sirve para atar ese B/L (ver bill_of_lading_tanker).
+      fx_ref_no:
+        desc_zh: "票据编号"
+        strategy: page_regex
+        regex: '票据编号:\s*(\d{7})'
 
       f33_contract_no:
         desc_zh: "合同号"                        # (contract no.)
         strategy: right
         label: "合同号"
         type: number
+        # en samples2/ el numero viene pegado a la etiqueta: "合同号：6759315"
+        fallback:
+          - {strategy: inline, label: "合同号", sep: "：", regex: '\d+'}
 
       # "数量" en la tabla del contrato (toneladas) es lo que el Excel de
       # reglas llama 'Net Weight' para este documento -- el machete cruza
@@ -378,6 +397,10 @@ doc_types:
     label_es: "Orden de embarque de contenedores"
     label_zh: "集装箱货物托运单"
     # 3.7.1 Bill of Lading.pdf -- pagina unica, texto nativo.
+    # format_hint: palabras del titulo de un B/L de cualquier formato. Una pagina
+    # que las trae y no es de ningun tipo conocido queda UNSUPPORTED: se revisa a
+    # mano, no se la da por Other ni al documento por faltante.
+    format_hint: ["BILL OF LADING", "提运单", "提单", "托运单"]
 
     signature:
       required:
@@ -432,6 +455,116 @@ doc_types:
         type: number
 
   # ---------------------------------------------------------------------------
+  # Otros formatos de los mismos documentos, vistos en samples2/. Son tipos
+  # aparte (como cargo_manifest y su detalle): cada uno trae lo suyo y las reglas
+  # toman el que aparezca en el embarque.
+
+  # 3.7.1 de los PP de enero: impresion del sistema del puerto (newmps.szvsc.com)
+  bill_of_lading_port:
+    label_es: "B/L - impresion del sistema del puerto"
+    label_zh: "提运单"
+
+    signature:
+      required:
+        - "总提运单号"
+        - "IMOCODE"
+      optional:
+        - "航次号"
+        - "装船单号"
+      negative: []
+
+    fields:
+      f41_bl_no:
+        desc_zh: "总提运单号"
+        strategy: page_regex
+        regex: '总提运单号:\s*(\S+)'
+
+      f42_conveyance_voyage:
+        desc_zh: "Conveyance Name & Voyage No."
+        strategy: page_regex
+        regex: 'IMOCODE:\s*(\S+)\s+航次号:\s*(\S+)'
+        join: "/"
+
+      f43_container_nos:
+        desc_zh: "container number(s)"
+        strategy: page_regex
+        regex: '[A-Z]{4}\d{7}'
+        multi: true
+        unique: true
+
+      f44_gross_weight:
+        desc_zh: "total KGS"
+        strategy: page_regex
+        regex: '([\d,]+)\s*KGS'
+        type: number
+
+  # 3.7.1 de los liquidos: B/L de la terminal, escaneado. No trae N° de B/L, ni
+  # viaje, ni SO: se ata por la referencia, que el contrato trae como 票据编号.
+  bill_of_lading_tanker:
+    label_es: "B/L de buque tanque"
+    label_zh: "提单"
+    attach_by: ref
+
+    signature:
+      required:
+        - "BILL OF LADING"
+        - "Barrels"
+      optional:
+        - "Metric Ton"
+        - "Customer reference number"
+      negative: []
+
+    fields:
+      fx_ref_no:
+        desc_zh: "Customer reference number"
+        strategy: page_regex
+        regex: 'Customer\s*reference\s*number\s*:?\s*(\d{7})'
+
+      # en toneladas: la regla 10 lo convierte con 'unit'
+      f44_gross_weight:
+        desc_zh: "Metric Ton"
+        strategy: table_col
+        table:
+          header_from: "Metric Ton"
+          header_to: "Long Ton"
+        line: 1
+        type: number
+
+  # 3.7.2 de los liquidos. Trae el S/O y el buque + viaje que el B/L no tiene.
+  # El peso es el nominal, no el embarcado: no sirve para la regla 10.
+  cargo_manifest_tanker:
+    label_es: "Manifiesto de exportacion de buque tanque"
+    label_zh: "出口舱单"
+    attach_by: bl
+
+    signature:
+      required:
+        - "MANIFEST"
+        - "出口舱单"
+      optional:
+        - "IN BULK"
+        - "BERTH"
+      negative: []
+
+    fields:
+      fx_bl_no:
+        desc_zh: "S/O NO."
+        strategy: page_regex
+        regex: '(?<![A-Z0-9])A\d{12}(?!\d)'
+
+      fx_conveyance_voyage:
+        desc_zh: "出口舱单编号"
+        strategy: page_regex
+        regex: '出口舱单编号:\s*([A-Z]{2}\d{7})\s+(\S+)'
+        join: "/"
+
+      f47_gross_weight:
+        desc_zh: "gross weight (KGS)"
+        strategy: page_regex
+        regex: '([\d,]+)\s*KGS'
+        type: number
+
+  # ---------------------------------------------------------------------------
   # 3.7.2 Cargo Manifest.pdf tambien trae dos "vistas" distintas: la portada
   # con los totales (pag 1) y el detalle de contenedor/seal/peso (pag 2). La
   # pag 3 es puro texto legal y no matchea ninguna de las dos a proposito.
@@ -439,6 +572,7 @@ doc_types:
   cargo_manifest:
     label_es: "Waybill / manifiesto de carga (portada)"
     label_zh: ""
+    format_hint: ["MANIFEST", "舱单"]
 
     signature:
       required:
@@ -613,7 +747,11 @@ doc_types:
         - "退税额CNY"
         - "免抵退税额"
         - "出口销售额"
-      negative: []
+      # una tabla que nombra otros documentos es una guia, no un refund record:
+      # la del equipo trae estos headers y debajo la lista de documentos 3.x
+      negative:
+        - "Bill of Lading"
+        - "Cargo Manifest"
 
     fields:
       cdf_no:
@@ -881,7 +1019,7 @@ doc_types:
       f50_lsr_no:
         desc_zh: "LSR No"
         strategy: page_regex
-        regex: 'LSR\s*(?:No\s*:?)?\s*(\d{10})'
+        regex: 'LSR\s*(?:No\s*[:#]?)?\s*(\d{10})'
       f51_license_plate:
         desc_zh: "运输工具牌号"
         strategy: page_regex
@@ -917,7 +1055,7 @@ doc_types:
       f71_lsr_no:
         desc_zh: "LSR No"
         strategy: page_regex
-        regex: 'LSR\s*(?:No\s*:?)?\s*(\d{10})'
+        regex: 'LSR\s*(?:No\s*[:#]?)?\s*(\d{10})'
 
   customs_fee_invoice:
     label_es: "Factura de despacho aduanero (Yili Guangzhou)"
@@ -939,7 +1077,7 @@ doc_types:
       f77_lsr_no:
         desc_zh: "LSR"
         strategy: page_regex
-        regex: 'LSR\s*(?:No\s*:?)?\s*(\d{10})'
+        regex: 'LSR\s*(?:No\s*[:#]?)?\s*(\d{10})'
       f78_invoice_no:
         desc_zh: "发票号码"
         strategy: page_regex
@@ -980,7 +1118,8 @@ doc_types:
         regex: 'LSR\s*No\s*:\s*(\d{10})'
 
     rows:
-      regex: '(?P<fsd>\d{10})\s+(?P<so>\d{8})\s+(?P<fo>\d{10})\s+(?P<date>\d{2}/\d{2}/\d{4}).*?(?P<gross>[\d,]+\.\d{3})\s+(?P<net>[\d,]+\.\d{3})\s+(?P<charge>[^\n]+)'
+      # fecha: 03/31/2025 en samples/, 05.12.2025 en samples2/ (igual en los 3 estados)
+      regex: '(?P<fsd>\d{10})\s+(?P<so>\d{7,8})\s+(?P<fo>\d{10})\s+(?P<date>\d{2}[/.]\d{2}[/.]\d{4}).*?(?P<gross>[\d,]+\.\d{3})\s+(?P<net>[\d,]+\.\d{3})\s+(?P<charge>[^\n]+)'
       fields:
         f53_contract_no: {group: so, desc_zh: "SO/STO"}
         f54_net_weight: {group: net, type: number, desc_zh: "Net Weight (KG)"}
@@ -997,7 +1136,10 @@ doc_types:
     signature:
       required:
         - "Logistics Services Report"
+      # los graneles de samples2/ facturan "Lift On / Lift Off" en vez de Management Fee
+      required_any:
         - "Management Fee"
+        - "Lift On / Lift Off"
       optional:
         - "LSR No"
       negative:
@@ -1011,7 +1153,7 @@ doc_types:
         regex: 'LSR\s*No\s*:\s*(\d{10})'
 
     rows:
-      regex: '(?P<fsd>\d{10})\s+(?P<so>\d{8})\s+(?P<fo>\d{10})\s+(?P<date>\d{2}/\d{2}/\d{4}).*?(?P<gross>[\d,]+\.\d{3})\s+(?P<net>[\d,]+\.\d{3})\s+(?P<charge>[^\n]+)'
+      regex: '(?P<fsd>\d{10})\s+(?P<so>\d{7,8})\s+(?P<fo>\d{10})\s+(?P<date>\d{2}[/.]\d{2}[/.]\d{4}).*?(?P<gross>[\d,]+\.\d{3})\s+(?P<net>[\d,]+\.\d{3})\s+(?P<charge>[^\n]+)'
       fields:
         f73_contract_no: {group: so, desc_zh: "SO/STO"}
         f74_net_weight: {group: net, type: number, desc_zh: "Net Weight (KG)"}
@@ -1042,7 +1184,7 @@ doc_types:
         regex: 'LSR\s*No\s*:\s*(\d{10})'
 
     rows:
-      regex: '(?P<fsd>\d{10})\s+(?P<so>\d{8})\s+(?P<fo>\d{10})\s+(?P<date>\d{2}/\d{2}/\d{4}).*?(?P<gross>[\d,]+\.\d{3})\s+(?P<net>[\d,]+\.\d{3})\s+(?P<charge>[^\n]+)'
+      regex: '(?P<fsd>\d{10})\s+(?P<so>\d{7,8})\s+(?P<fo>\d{10})\s+(?P<date>\d{2}[/.]\d{2}[/.]\d{4}).*?(?P<gross>[\d,]+\.\d{3})\s+(?P<net>[\d,]+\.\d{3})\s+(?P<charge>[^\n]+)'
       fields:
         f81_contract_no: {group: so, desc_zh: "SO/STO"}
         f82_net_weight: {group: net, type: number, desc_zh: "Net Weight (KG)"}

@@ -60,11 +60,11 @@ def flatten(results):
             continue
         for p in r["pages"]:
             st = p["classification"]["status"]
-            if st == "SKIPPED":
+            if st in ("SKIPPED", "OTHER", "UNSUPPORTED"):
                 # visible a proposito: si algun dia un dato aparece en una
                 # pagina que salteamos, tiene que poder verse que la salteamos
-                rows.append([r["path"], p["page"], "SKIPPED", "",
-                             p.get("triage", {}).get("reason", ""), 0, "SKIPPED"])
+                rows.append([r["path"], p["page"], st, "",
+                             p.get("triage", {}).get("reason") or "", 0, st])
                 continue
             tipo = p["classification"]["type"] or "UNIDENTIFIED"
             if not p["fields"]:
@@ -138,6 +138,9 @@ DOC_LABELS = {
     "customs_fee_invoice": "Customs Declaration Fee Invoice (3.8.2.1)",
     "customs_fee_statement": "Customs Declaration Fee Statement (3.8.2.2)",
     "bill_of_lading": "Bill of Lading (3.7.1)",
+    "bill_of_lading_port": "Bill of Lading (3.7.1)",
+    "bill_of_lading_tanker": "Bill of Lading (3.7.1)",
+    "cargo_manifest_tanker": "Cargo Manifest (3.7.2)",
     "cargo_manifest": "Cargo Manifest (3.7.2)",
     "cargo_manifest_detail": "Cargo Manifest (3.7.2)",
     "shipping_order": "Shipping Order (3.7.4.3)",
@@ -193,6 +196,10 @@ def flatten_reconciliation(shipments):
     return rows
 
 
+# para probar: oculta en Reconciliation las exportaciones que solo estan en el
+# refund record. Siguen en el checklist y en el Excel. False las vuelve a mostrar.
+RECON_HIDE_NO_DOCS = True
+
 RECON_COL_WIDTHS = [14, 6, 40, 14, 84]
 RECON_FONT = ("Segoe UI", 10)
 
@@ -238,6 +245,8 @@ CHK_DETAIL_WIDTHS = [9, 60, 12, 77]
 CHK_COLORS = {"PRESENT": ("#F0FDF4", "#166534"),       # (fondo, texto)
               "MISSING": ("#FEF2F2", "#991B1B"),
               "MANUAL": ("#FFEDD5", "#C2410C"),
+              "OPTIONAL": ("#F1F5F9", "#475569"),
+              "NA": ("#F1F5F9", "#475569"),
               "UNASSIGNED": ("#FEF2F2", "#991B1B")}
 UNASSIGNED = "(unassigned)"
 
@@ -358,7 +367,11 @@ def tab_process():
         [sg.Frame("Documents", [[
             sg.Text("Folder", size=(10, 1)),
             sg.Input(str(DEFAULT_SAMPLES), key="-FOLDER-", expand_x=True),
-            sg.FolderBrowse("Browse", target="-FOLDER-")]], expand_x=True)],
+            sg.FolderBrowse("Browse", target="-FOLDER-"),
+            sg.Checkbox("Read every page (slower)", key="-READ_ALL-",
+                        tooltip="Don't use the quick look that marks pages as Other. "
+                                "Use it if a document you expected shows up as Other.")]],
+            expand_x=True)],
         [sg.Push(),
          sg.Button("Process", key="-PROCESS-", size=(18, 2),
                    font=("Segoe UI", 10, "bold"))],
@@ -394,7 +407,8 @@ def tab_results():
          counter("-N_UNK-", "Unidentified", C["bad"]), sg.Push()],
         [sg.Text("Status"),
          sg.Combo(["All", "OK", "OK_CORROBORATED", "CORRECTED", "NOT_FOUND",
-                   "PARTIAL", "UNRESOLVED", "ERROR"], default_value="All",
+                   "PARTIAL", "UNRESOLVED", "UNSUPPORTED", "OTHER", "ERROR"],
+                  default_value="All",
                   readonly=True, key="-FILTER-", enable_events=True, size=(20, 1)),
          sg.Text("Search"), sg.Input(key="-SEARCH-", enable_events=True, size=(30, 1)),
          sg.Push(), sg.Button("Export to Excel", key="-EXPORT-", disabled=True,
@@ -469,12 +483,14 @@ def tab_reconciliation():
          sg.Text("   NOT_VERIFIABLE — a document is missing or the reading isn't reliable",
                  text_color=C["warn"]),
          sg.Text("   INFO — shown side by side, not checked",
+                 text_color=C["muted"]),
+         sg.Text("   NA — doesn't apply to this type of export",
                  text_color=C["muted"])],
         [sg.Text("Shipment"),
          sg.Combo(["All"], default_value="All", readonly=True,
                   key="-RECON_FILTER-", enable_events=True, size=(20, 1)),
          sg.Text("Verdict"),
-         sg.Combo(["All", "VERIFIED", "DISCREPANCY", "NOT_VERIFIABLE", "INFO"],
+         sg.Combo(["All", "VERIFIED", "DISCREPANCY", "NOT_VERIFIABLE", "INFO", "NA"],
                   default_value="All", readonly=True,
                   key="-RECON_VERDICT-", enable_events=True, size=(18, 1))],
         # sin scroll horizontal: Description/Detail ya vienen recortadas al
@@ -519,6 +535,8 @@ def tab_checklist():
          sg.Text("   MISSING — not found in the folder", text_color=C["bad"]),
          sg.Text("   MANUAL — no automatic detection for this document yet, "
                  "check it by hand", text_color=C["warn"]),
+         sg.Text("   OPTIONAL / NA — not required for this export type",
+                 text_color=C["muted"]),
          sg.Push(),
          sg.Button("Export by shipment", key="-ORGANIZE-", disabled=True,
                    button_color=("#FFFFFF", C["ok"]),
@@ -627,6 +645,7 @@ def main():
                       "NOT_FOUND": ("#FEF2F2", "#991B1B"),
                       "PARTIAL": ("#FFF7ED", "#9A3412"),
                       "UNRESOLVED": ("#FFF7ED", "#9A3412"),
+                      "UNSUPPORTED": ("#FFF7ED", "#9A3412"),
                       "ERROR": ("#FEF2F2", "#991B1B"),
                       }.get(r[6], ("#F9FAFB", "#4B5563"))
             colors.append((i, fg, bg))
@@ -658,6 +677,7 @@ def main():
                                  "DISCREPANCY": ("#FEF2F2", "#991B1B"),
                                  "NOT_VERIFIABLE": ("#FFEDD5", "#C2410C"),
                                  "INFO": ("#F1F5F9", "#475569"),
+                                 "NA": ("#F1F5F9", "#475569"),
                                  }[r[3]])) for i, r in enumerate(shown)]
         win["-RECON_TABLE-"].update(values=[_truncate_recon_row(r) for r in shown],
                                     row_colors=colors)
@@ -742,7 +762,9 @@ def main():
                 recon = reconciliation.run(results, recon_rules,
                                            rules["doc_types"], checklist_docs)
                 recon_shipments = recon["shipments"]
-                recon_rows = flatten_reconciliation(recon_shipments)
+                recon_rows = flatten_reconciliation(
+                    [s for s in recon_shipments if not RECON_HIDE_NO_DOCS
+                     or not organize._no_documents(s)])
                 chk_summary, chk_detail = flatten_checklist(recon)
                 win["-ORGANIZE-"].update(disabled=not recon["shipments"])
                 refresh_checklist_summary()
@@ -806,6 +828,7 @@ def main():
             status("Starting…", C["primary"], 0)
             t_start = time.perf_counter()
             processed_folder = folder
+            extract.QUICK_LOOK_ENABLED = not val["-READ_ALL-"]
             win["-ORGANIZE-"].update(disabled=True)
             worker = threading.Thread(target=run_extraction,
                                       args=(folder, rules, out_q), daemon=True)

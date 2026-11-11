@@ -11,12 +11,13 @@ Lo que un documento por si solo NO puede resolver:
   3. Cuando NO corresponde comparar: campo no encontrado, confianza baja, o
      directamente sin extractor todavia (ver _resolver_pata()).
 
-Devuelve, por embarque y por regla, uno de cuatro veredictos:
+Devuelve, por embarque y por regla, uno de cinco veredictos:
   VERIFIED         -> al menos 2 patas confiables y todas coinciden
   DISCREPANCY      -> al menos 2 patas confiables y no coinciden
   NOT_VERIFIABLE   -> menos de 2 patas confiables (falta doc, NOT_FOUND,
                      confianza baja, o el campo tiene precision perdida)
   INFO             -> regla con check: false, solo muestra los datos
+  NA               -> regla que no aplica a este tipo de exportacion (not_for)
 """
 
 import re
@@ -52,6 +53,7 @@ JOIN_KEYS = [
     ("customs_fee_statement", "f81_contract_no", "so"),
     ("customs_declaration", "f16_container_nos", "container"),
     ("bill_of_lading", "f43_container_nos", "container"),
+    ("bill_of_lading_port", "f43_container_nos", "container"),
     ("cargo_manifest_detail", "f45_container_nos", "container"),
     ("shipping_order", "f58_container_no", "container"),
     ("delivery_note", "f65_container_nos", "container"),
@@ -67,6 +69,15 @@ JOIN_KEYS = [
 # el "starting point" del equipo: lo que esta en este registro es lo que se
 # reclamo al fisco (ver rules.yaml)
 CLAIM_DOC_TYPE = "refund_record"
+
+# 包装种类 del CDF, confirmado por el equipo y logistica. Los solidos traen
+# 包/袋/天然木托, 包/袋/其他包装 o solo 包/袋: por eso se compara el comienzo.
+LIQUID_PACKING = "散装"
+SOLID_PACKING = "包/袋"
+
+# attach_by de rules.yaml: que campos tienen que compartir el documento y el
+# embarque, por el final del nombre del campo
+ATTACH_SUFFIX = {"lsr": "_lsr_no", "bl": "_bl_no", "ref": "_ref_no"}
 
 # shipping_order y tax_filing_directory son LOGS (per_row en rules.yaml):
 # un solo archivo con filas de muchos embarques. process_xlsx() ya los
@@ -365,9 +376,12 @@ def _values_equal(a, b, kind, compare=None):
     return norm(a) == norm(b)
 
 
-def evaluate_rule(cluster, rule, doc_types):
+def evaluate_rule(cluster, rule, doc_types, kind=None):
     legs = [_resolver_pata(cluster, doc_types, item) for item in rule["fields"]]
 
+    if rule.get("not_for") and rule["not_for"] == kind:
+        return {"id": rule["id"], "desc": rule["desc"].strip(), "verdict": "NA",
+                "legs": legs}
     # algunas reglas del machete agrupan campos que jamas van a ser el mismo
     # texto aunque ambos esten bien leidos (ej. codigo de modalidad de
     # transporte vs. nombre del buque) -- verificado a mano, ver el 'desc'
@@ -446,21 +460,50 @@ def _key_values(rec, kind=None):
 
 # --- Checklist de documentacion -----------------------------------------------
 PRESENT, MISSING, MANUAL = "PRESENT", "MISSING", "MANUAL"
+OPTIONAL, NA = "OPTIONAL", "NA"
 
 
-def evaluate_checklist(cluster, documents):
+def shipment_kind(cluster):
+    """
+    "solid" | "liquid" segun el 包装种类 del CDF. None si el embarque no tiene
+    CDF; "unknown" si no se pudo leer, es otro valor, o las versiones del CDF
+    no coinciden: nunca se adivina (lo revisa una persona).
+    """
+    values = {str(rec["fields"]["fx_packing_type"].get("value")).replace(" ", "")
+              for rec in cluster if rec["doc_type"] == "customs_declaration"
+              and "fx_packing_type" in rec["fields"]}
+    if not values:
+        return None
+    kinds = {"liquid" if v == LIQUID_PACKING
+             else "solid" if v.startswith(SOLID_PACKING) else "unknown" for v in values}
+    return kinds.pop() if len(kinds) == 1 else "unknown"
+
+
+def evaluate_checklist(cluster, documents, kind=None, unsupported=()):
     """
     Un renglon por documento de checklist.yaml:
-      PRESENT -> hay al menos una pagina/fila de alguno de sus doc_types
-      MISSING -> tiene extractor y no aparece en el embarque
-      MANUAL  -> sin extractor: no se puede afirmar ni que esta ni que falta
+      PRESENT  -> hay al menos una pagina/fila de alguno de sus doc_types
+      MISSING  -> tiene extractor y no aparece en el embarque
+      MANUAL   -> sin extractor: no se puede afirmar ni que esta ni que falta
+      OPTIONAL -> no aparece, y en este tipo de exportacion no es obligatorio
+      NA       -> no aparece, y en este tipo de exportacion no aplica
+    unsupported: tipos que estan en la carpeta del embarque en un formato que
+    no sabemos leer. Tampoco se los da por faltantes: MANUAL.
     """
+    absent = {"required": MISSING, "manual": MANUAL, "na": NA}
     out = []
     for d in documents:
         types = d.get("doc_types") or []
         hits = [{"file": rec["file"], "page": rec["page"]}
                 for rec in cluster if rec["doc_type"] in types]
-        status = MANUAL if not types else (PRESENT if hits else MISSING)
+        if hits:
+            status = PRESENT
+        elif not types or set(types) & set(unsupported):
+            status = MANUAL
+        elif kind == "liquid":
+            status = absent.get(d.get("liquid"), OPTIONAL)
+        else:
+            status = MISSING
         out.append({"code": d["code"], "name": d["name"], "status": status,
                     "sources": hits, "doc_types": types})
     return out
@@ -551,19 +594,22 @@ def _attach(clusters, attachables, doc_types):
                     estado de cuenta (filas con *_lsr_no) tenga ese LSR. Una
                     misma factura puede quedar en varios embarques: es
                     correcto, cubre todas las SO del mes.
+      bl, ref    -> B/L y manifiesto de liquidos: no traen SO, se atan por el
+                    S/O del CDF y por la referencia del contrato.
       amount_usd -> cobro bancario: va al embarque cuyo monto USD coincide,
                     SOLO si coincide uno. Si coinciden varios no se adivina.
     """
     lost = []
-    lsr_of = [set(v for rec in c for v in _field_values(rec, "_lsr_no")) for c in clusters]
     for rec in attachables:
         how = doc_types[rec["doc_type"]]["attach_by"]
         base = {"file": rec["file"], "page": rec["page"], "doc_type": rec["doc_type"]}
-        if how == "lsr":
-            mine = set(_field_values(rec, "_lsr_no"))
-            hits = [i for i, lsrs in enumerate(lsr_of) if mine & lsrs]
-            reason = (f"LSR {', '.join(sorted(mine)) or '(not read)'} is not in the "
-                      "statement rows of any shipment in the folder")
+        if how in ATTACH_SUFFIX:
+            suffix = ATTACH_SUFFIX[how]
+            mine = set(_field_values(rec, suffix))
+            hits = [i for i, c in enumerate(clusters)
+                    if mine & {v for r in c for v in _field_values(r, suffix)}]
+            reason = (f"{how.upper()} {', '.join(sorted(mine)) or '(not read)'} does "
+                      "not match any shipment in the folder")
         elif how == "amount_usd":
             amount = next((f["value"] for n, f in rec["fields"].items()
                            if n.endswith("_amount") and f.get("value") is not None), None)
@@ -585,6 +631,52 @@ def _attach(clusters, attachables, doc_types):
     return lost
 
 
+def _cdf_version(rec):
+    """(monto USD, peso neto) de un CDF: lo que cambia entre versiones."""
+    price = rec["fields"].get("f20_price_block", {}).get("value")
+    total = price.get("total_price") if isinstance(price, dict) else None
+    return total, rec["fields"].get("f18_net_weight", {}).get("value")
+
+
+def _pick_cdf_version(cluster):
+    """
+    Con versiones corregidas del CDF vale la que coincide con el refund record
+    (acordado con el equipo). Devuelve (records para las reglas, avisos). Si
+    ninguna coincide no se elige: quedan todas, y _combine_legs las muestra
+    como MULTI para revisar a mano.
+    """
+    cdfs = [r for r in cluster if r["doc_type"] == "customs_declaration"]
+    versions = {_cdf_version(r) for r in cdfs}
+    if len(versions) < 2:
+        return cluster, []
+    claims = [(r["fields"].get("amount_usd", {}).get("value"),
+               r["fields"].get("quantity_kg", {}).get("value"))
+              for r in cluster if r["doc_type"] == CLAIM_DOC_TYPE]
+    matches = lambda v: any(
+        None not in (*v, usd, kg) and _numbers_close(v[0], usd) and _numbers_close(v[1], kg)
+        for usd, kg in claims)
+    chosen = [r for r in cdfs if matches(_cdf_version(r))]
+    if not chosen:
+        return cluster, [f"{len(versions)} versions of the CDF and none matches the "
+                         "refund record -- check by hand"]
+    files = ", ".join(sorted({r["file"] for r in chosen}))
+    return ([r for r in cluster if r not in cdfs or r in chosen],
+            [f"{len(versions)} versions of the CDF: using the one that matches the "
+             f"refund record ({files})"])
+
+
+def _top_folder(file):
+    parts = Path(file).parts
+    return parts[0] if len(parts) > 1 else None
+
+
+def unsupported_pages(results):
+    """[{file, page, doc_type}] de los documentos en un formato que no sabemos leer."""
+    return [{"file": r["path"], "page": p["page"], "doc_type": p["classification"]["hint"]}
+            for r in results if r.get("ok") for p in r["pages"]
+            if p["classification"]["status"] == "UNSUPPORTED"]
+
+
 def run(results, rules=None, doc_types=None, documents=None):
     """
     Devuelve {"shipments": [...], "unassigned": [...], "folder_warnings": [...]}:
@@ -599,6 +691,7 @@ def run(results, rules=None, doc_types=None, documents=None):
     documents = documents if documents is not None else load_checklist()
 
     records = build_records(results)
+    unsupported = unsupported_pages(results)
     # los documentos con attach_by (facturas mensuales, cobro bancario) NO
     # participan del union-find: se adjuntan despues, ver _attach()
     attachables = [r for r in records if doc_types.get(r["doc_type"], {}).get("attach_by")]
@@ -626,21 +719,36 @@ def run(results, rules=None, doc_types=None, documents=None):
         # un embarque con un solo documento se reporta igual: sus reglas
         # salen NOT_VERIFIABLE y el checklist muestra lo que falta, que es
         # justamente lo que hay que saber de el
-        checklist = evaluate_checklist(cluster, documents)
+        kind = shipment_kind(cluster)
+        # un documento en formato desconocido no trae claves: se lo busca en la
+        # carpeta de la exportacion (el equipo manda una por SO)
+        folders = {_top_folder(rec["file"]) for rec in cluster} - {None}
+        hints = sorted({u["doc_type"] for u in unsupported
+                        if _top_folder(u["file"]) in folders})
+        checklist = evaluate_checklist(cluster, documents, kind, hints)
+        active, version_notes = _pick_cdf_version(cluster)
+        kind_notes = ["could not tell solid from liquid (packing type on the CDF) -- "
+                      "the checklist assumes solid, check by hand"] if kind == "unknown" else []
+        format_notes = [f"a document in this folder looks like {h} in a format the "
+                        "tool can't read yet -- check by hand" for h in hints
+                        if not any(h in i["doc_types"] and i["status"] == PRESENT
+                                   for i in checklist)]
         shipments.append({
             "shipment": _cluster_label(cluster),
+            "kind": kind,
             "doc_types": sorted({rec["doc_type"] for rec in cluster}),
             "files": sorted({rec["file"] for rec in cluster}),
             # que paginas/filas componen el embarque -- lo usa organize.py
             # para copiar documentos y armar el reporte por embarque
             "records": [{"file": rec["file"], "page": rec["page"],
                          "doc_type": rec["doc_type"]} for rec in cluster],
-            "rules": [evaluate_rule(cluster, r, doc_types) for r in rules],
+            "rules": [evaluate_rule(active, r, doc_types, kind) for r in rules],
             "checklist": checklist,
-            "warnings": _warnings(cluster, checklist, doc_types, claims_loaded),
+            "warnings": (_warnings(cluster, checklist, doc_types, claims_loaded)
+                         + version_notes + kind_notes + format_notes),
         })
     shipments.sort(key=lambda s: s["shipment"])
-    return {"shipments": shipments, "unassigned": unassigned,
+    return {"shipments": shipments, "unassigned": unassigned, "unsupported": unsupported,
             "folder_warnings": folder_warnings(records, doc_types, documents)}
 
 

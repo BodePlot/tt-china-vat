@@ -14,6 +14,7 @@ import unicodedata
 from pathlib import Path
 
 import cv2
+import numpy as np
 import openpyxl
 import pymupdf
 import yaml
@@ -28,6 +29,17 @@ TRIAGE_MAX_BOX_HEIGHT = 250      # px a OCR_DPI
 # hace falta resolucion para medir el tamano de las cajas, y a 0.4 la
 # decision de saltear fue identica a la de resolucion completa en samples/
 TRIAGE_SCALE = 0.4
+
+# Mirada rapida: antes del OCR completo se leen solo los renglones cortos de
+# la parte de arriba de la pagina (donde va el titulo). Si ahi no aparece la
+# firma de un tipo con campos, la pagina es "Other": no esta en rules.xlsx y no
+# se analiza (acordado con el equipo de impuestos). Medido sobre las 263
+# paginas leidas por OCR de samples/ y samples2/: en las paginas con datos la
+# palabra esta como mucho al 27% de la altura y en un renglon de relacion
+# ancho/alto < 18. Un parrafo no pasa ese filtro: de ~100 para arriba.
+QUICK_LOOK_ENABLED = True
+QUICK_TOP_FRACTION = 0.30
+QUICK_MAX_ASPECT = 25
 
 # Paginas de un archivo puntual que se saben sin datos y el triage automatico
 # NO detecta -- confirmado a mano, no adivinado. Pagina 3 de 3.7.2 Cargo
@@ -52,12 +64,14 @@ _ocr_engine = None
 
 
 def _cache_file(path):
-    st = Path(path).stat()
-    # la clave incluye mtime/size (detecta re-escaneos) y los parametros que
-    # afectan el resultado del OCR: si cambian, la cache vieja queda huerfana
-    # (nunca matchea) y se regenera sola, sin que haya que borrarla a mano.
-    raw = (f"{Path(path).resolve()}|{st.st_mtime_ns}|{st.st_size}|"
-           f"{OCR_DPI}|{TRIAGE_ENABLED}|{TRIAGE_MAX_BOX_HEIGHT}|v{CACHE_VERSION}")
+    # la clave es el CONTENIDO del archivo (mover, renombrar o tener dos copias
+    # no repite el OCR) mas los parametros que afectan el resultado: si cambian,
+    # la cache vieja queda huerfana (nunca matchea) y se regenera sola, sin que
+    # haya que borrarla a mano.
+    content = hashlib.sha1(Path(path).read_bytes()).hexdigest()
+    raw = (f"{content}|{OCR_DPI}|{TRIAGE_ENABLED}|{TRIAGE_MAX_BOX_HEIGHT}|"
+           f"{QUICK_LOOK_ENABLED}|{QUICK_TOP_FRACTION}|{QUICK_MAX_ASPECT}|"
+           f"v{CACHE_VERSION}")
     digest = hashlib.sha1(raw.encode("utf-8")).hexdigest()
     return CACHE_DIR / f"{digest}.json"
 
@@ -103,8 +117,18 @@ def normalize(s: str) -> str:
     return re.sub(r"[\s　]+", "", s)
 
 
-def page_items(page) -> list[dict]:
-    """Cajas de texto con posicion. Usa texto nativo si el PDF lo trae."""
+def _pixmap_array(pix):
+    """Imagen RGB del render, sin pasar por PNG: codificar y decodificar una
+    pagina a 300 dpi cuesta ~0.3s por pagina y da exactamente los mismos pixeles."""
+    return np.frombuffer(pix.samples, np.uint8).reshape(pix.height, pix.width, pix.n)
+
+
+def page_items(page, signatures=None) -> list[dict]:
+    """
+    Cajas de texto con posicion. Usa texto nativo si el PDF lo trae.
+    signatures (ver title_signatures): habilita la mirada rapida que descarta
+    las paginas Other sin pagar el OCR completo.
+    """
     native = page.get_text("dict")
     boxes = []
     for blk in native.get("blocks", []):
@@ -123,10 +147,9 @@ def page_items(page) -> list[dict]:
         # el texto nativo es gratis: no hay nada que ahorrar salteandolo
         return boxes, {"skip": False, "median_box_h": None, "n_boxes": len(boxes)}
 
-    pix = page.get_pixmap(dpi=OCR_DPI)
-    png = pix.tobytes("png")
+    img = _pixmap_array(page.get_pixmap(dpi=OCR_DPI))
 
-    triage = triage_page(png)
+    triage = triage_page(img)
     if triage["skip"]:
         return [], triage                    # no se paga el reconocimiento
 
@@ -152,8 +175,13 @@ def page_items(page) -> list[dict]:
         angle, fixed = _try_rotation_fix(page)
         if fixed is not None:
             result, rotation = fixed, angle
+    elif result is None and det_boxes and signatures:
+        text = _quick_look(img, det_boxes)
+        if text is not None and not _matches_signature(text, signatures):
+            return [], {**triage, "skip": True, "other": True, "quick_text": text,
+                        "reason": "Other: no known document title on the page"}
     if result is None:
-        result, _ = get_ocr()(png)
+        result, _ = get_ocr()(img)
         if _looks_rotated(result):           # sin triage (o sin cajas sueltas)
             angle, fixed = _try_rotation_fix(page)
             if fixed is not None:
@@ -237,7 +265,7 @@ def workbook_items(path) -> list[dict]:
 
 
 # --- Triage de pagina -------------------------------------------------------
-def triage_page(png_bytes):
+def triage_page(img):
     """
     Decide si vale la pena reconocer el texto de esta pagina, corriendo
     SOLO la etapa de deteccion (~1s, ver _detect_only) en vez del OCR
@@ -262,7 +290,7 @@ def triage_page(png_bytes):
     # TODO el calculo va adentro del try: cualquier formato inesperado de la
     # libreria degrada a "no saltear" en vez de tirar abajo el documento.
     try:
-        items = _detect_only(png_bytes)
+        items = _detect_only(img)
         heights = [h for h in (_box_height(b) for b in items) if h and h > 0]
         if not heights:
             return {"skip": False, "median_box_h": None, "n_boxes": len(items),
@@ -298,7 +326,7 @@ def _has_text(items):
         return False
 
 
-def _detect_only(png_bytes):
+def _detect_only(img):
     """
     Solo la deteccion de cajas, sin reconocer el texto, sobre la imagen
     achicada a TRIAGE_SCALE. Devuelve cajas sueltas en pixeles del render
@@ -314,8 +342,7 @@ def _detect_only(png_bytes):
     (resultado completo, que _box_height() tambien sabe leer).
     """
     eng = get_ocr()
-    if hasattr(eng, "text_detector") and hasattr(eng, "load_img"):
-        img = eng.load_img(png_bytes)
+    if hasattr(eng, "text_detector"):
         h, w = img.shape[:2]
         small = cv2.resize(img, (max(1, int(w * TRIAGE_SCALE)),
                                  max(1, int(h * TRIAGE_SCALE))))
@@ -326,9 +353,9 @@ def _detect_only(png_bytes):
                 for b in boxes]
 
     try:
-        out = get_ocr()(png_bytes, use_det=True, use_cls=False, use_rec=False)
+        out = get_ocr()(img, use_det=True, use_cls=False, use_rec=False)
     except TypeError:
-        out = get_ocr()(png_bytes)          # version que no acepta los flags
+        out = get_ocr()(img)                # version que no acepta los flags
 
     if isinstance(out, tuple):              # (resultado, tiempos)
         out = out[0]
@@ -383,7 +410,52 @@ def _box_height(b):
     return _box_rect(b)[1]
 
 
-def _ocr_with_flip_ratio(png_bytes):
+_OCR_INTERNALS = ("text_detector", "sorted_boxes", "get_crop_img_list", "text_cls",
+                  "text_recognizer", "filter_boxes_rec_by_score")
+
+
+def _recognize_boxes(img, boxes):
+    """Reconoce las cajas dadas. Devuelve ([[caja, texto, conf]], fraccion al reves)."""
+    eng = get_ocr()
+    boxes = eng.sorted_boxes(boxes)
+    crops = eng.get_crop_img_list(img, boxes)
+    crops, cls_res, _ = eng.text_cls(crops)
+    flipped = sum(1 for label, _ in cls_res if label == "180") / len(cls_res)
+    rec_res, _ = eng.text_recognizer(crops)
+    boxes, rec_res = eng.filter_boxes_rec_by_score(boxes, rec_res)
+    return [[b.tolist(), r[0], str(r[1])] for b, r in zip(boxes, rec_res)], flipped
+
+
+def _quick_look(img, det_boxes):
+    """
+    Texto de los renglones cortos de la parte de arriba de la pagina, normalizado
+    y sin espacios. None = no se puede decidir, hay que leer la pagina completa:
+    sin la API interna esperada, o si la pagina esta cabeza abajo (el titulo
+    quedo en la parte de abajo y la zona de arriba no dice nada).
+    """
+    if not all(hasattr(get_ocr(), a) for a in _OCR_INTERNALS):
+        return None
+    limit = img.shape[0] * QUICK_TOP_FRACTION
+    picked = []
+    for b in det_boxes:
+        w, h = _box_rect(b)
+        if w and h and min(p[1] for p in b) < limit and w / h < QUICK_MAX_ASPECT:
+            picked.append(b)
+    if not picked:
+        return ""
+    result, flipped = _recognize_boxes(img, np.array(picked, dtype=np.float32))
+    if flipped > 0.5:
+        return None
+    return normalize(" ".join(txt for _, txt, _ in result))
+
+
+def _matches_signature(text, signatures):
+    """True si aparece alguna palabra obligatoria de un tipo y ninguna negativa."""
+    return any(any(k in text for k in req) and not any(k in text for k in neg)
+               for req, neg in signatures)
+
+
+def _ocr_with_flip_ratio(img):
     """
     OCR completo que ademas devuelve que fraccion de las lineas el
     clasificador de angulo marco como giradas 180 grados. Es el mismo
@@ -395,22 +467,13 @@ def _ocr_with_flip_ratio(png_bytes):
     sea "no esta al reves"), que es lo que se asumia antes.
     """
     eng = get_ocr()
-    needed = ("load_img", "text_detector", "sorted_boxes", "get_crop_img_list",
-              "text_cls", "text_recognizer", "filter_boxes_rec_by_score")
-    if not all(hasattr(eng, a) for a in needed):
-        return eng(png_bytes)[0], 0.0
+    if not all(hasattr(eng, a) for a in _OCR_INTERNALS):
+        return eng(img)[0], 0.0
 
-    img = eng.load_img(png_bytes)
     boxes, _ = eng.text_detector(img)
     if boxes is None or len(boxes) == 0:
         return None, 0.0
-    boxes = eng.sorted_boxes(boxes)
-    crops = eng.get_crop_img_list(img, boxes)
-    crops, cls_res, _ = eng.text_cls(crops)
-    flipped = sum(1 for label, _ in cls_res if label == "180") / len(cls_res)
-    rec_res, _ = eng.text_recognizer(crops)
-    boxes, rec_res = eng.filter_boxes_rec_by_score(boxes, rec_res)
-    result = [[b.tolist(), r[0], str(r[1])] for b, r in zip(boxes, rec_res)]
+    result, flipped = _recognize_boxes(img, boxes)
     return (result or None), flipped
 
 
@@ -448,7 +511,7 @@ def _try_rotation_fix(page):
     mat = pymupdf.Matrix(OCR_DPI / 72, OCR_DPI / 72).prerotate(90)
     pix = page.get_pixmap(matrix=mat)
     try:
-        result, flipped = _ocr_with_flip_ratio(pix.tobytes("png"))
+        result, flipped = _ocr_with_flip_ratio(_pixmap_array(pix))
     except Exception:
         return 0, None
     if result is None or flipped <= 0.5:
@@ -474,6 +537,7 @@ def classify(items, doc_types, min_score=0.5, min_margin=0.15):
         req = [normalize(k) for k in sig.get("required", [])]
         opt = [normalize(k) for k in sig.get("optional", [])]
         neg = [normalize(k) for k in sig.get("negative", [])]
+        any_of = [normalize(k) for k in sig.get("required_any", [])]
 
         if any(k in blob for k in neg):
             scores[name] = 0.0
@@ -482,6 +546,9 @@ def classify(items, doc_types, min_score=0.5, min_margin=0.15):
         if req and hits_req < len(req):
             scores[name] = 0.4 * (hits_req / len(req))   # parcial, no clasifica
             continue
+        if any_of and not any(k in blob for k in any_of):
+            scores[name] = 0.2
+            continue
         hits_opt = sum(k in blob for k in opt) if opt else 0
         scores[name] = 0.7 + 0.3 * (hits_opt / len(opt) if opt else 1)
 
@@ -489,6 +556,9 @@ def classify(items, doc_types, min_score=0.5, min_margin=0.15):
     best, best_score = ranked[0]
     second = ranked[1][1] if len(ranked) > 1 else 0.0
 
+    if best_score == 0 and blob:
+        # ni una palabra de ninguna firma: no es un documento de rules.xlsx
+        return {"type": None, "score": 0.0, "scores": scores, "status": "OTHER"}
     if best_score < min_score or (best_score - second) < min_margin:
         return {"type": None, "score": best_score, "scores": scores,
                 "status": "UNRESOLVED"}
@@ -759,7 +829,8 @@ def _resolve_one(items, spec):
     val = loc["value"]
     if spec.get("type") == "number":
         val = to_number(val)
-    res = {"value": val, "conf": loc.get("conf", 1.0), "status": "OK"}
+    res = {"value": val, "conf": loc.get("conf", 1.0),
+           "status": "OK" if val is not None else "NOT_FOUND"}
     if "x" in loc:
         res["origin"] = _origin([loc])
 
@@ -809,6 +880,10 @@ def process_xlsx(path, rules):
     items = workbook_items(path)
 
     cls = classify(items, rules["doc_types"])
+    # en un xlsx el texto es exacto, no hay ruido de OCR: sin la firma completa
+    # de ningun tipo no es un documento de rules.xlsx
+    if cls["status"] == "UNRESOLVED" and cls["score"] < 0.7:
+        cls["status"] = "OTHER"
     cfg = rules["doc_types"][cls["type"]] if cls["type"] else {}
     header_row = _xlsx_header_row(items, cfg) if cfg.get("per_row") else None
     if header_row is None:
@@ -851,11 +926,64 @@ def _xlsx_record(items, row, cls, cfg):
     return rec
 
 
+def _format_hint(text, rules):
+    """Tipo cuyo format_hint aparece en el titulo: es ese documento, en un formato
+    que no sabemos leer. None si no parece ninguno."""
+    text = text.upper()
+    for name, cfg in rules["doc_types"].items():
+        if any(normalize(k).upper() in text for k in cfg.get("format_hint", [])):
+            return name
+    return None
+
+
+def _top_text(items):
+    """Lo mismo que mira _quick_look, sobre una pagina ya leida."""
+    limit = QUICK_TOP_FRACTION * max((i["y"] + i["h"] for i in items), default=0)
+    return normalize(" ".join(i["text"] for i in items if i["y"] < limit
+                              and i["w"] / max(i["h"], 1) < QUICK_MAX_ASPECT))
+
+
+def _unsupported(rec, cls, text, rules):
+    """Marca la pagina si es un documento conocido en un formato desconocido."""
+    hint = _format_hint(text, rules)
+    if not hint:
+        return cls
+    rec["triage"] = {**rec["triage"], "reason": f"looks like {hint}: format not supported"}
+    return {**cls, "status": "UNSUPPORTED", "hint": hint}
+
+
+def title_signatures(rules):
+    """
+    [(palabras obligatorias, palabras negativas)] de cada tipo con campos: lo que
+    delata una pagina que hay que leer completa. Salen de rules.yaml, asi un tipo
+    nuevo entra solo. Los tipos sin campos (factura comercial, packing list) no
+    estan: no aportan datos y no figuran en rules.xlsx.
+    """
+    if not QUICK_LOOK_ENABLED:
+        return None
+    out = []
+    for cfg in rules["doc_types"].values():
+        if cfg.get("fields") and cfg.get("source_ext") != "xlsx":
+            sig = cfg.get("signature", {})
+            out.append(([normalize(k) for k in sig.get("required", [])
+                         + sig.get("required_any", [])],
+                        [normalize(k) for k in sig.get("negative", [])]))
+    return out
+
+
+def _stale_other(cached, signatures):
+    """Pagina que la cache tiene como Other pero rules.yaml ahora reconoce."""
+    triage = cached["triage"]
+    return bool(triage.get("other") and signatures
+                and _matches_signature(triage.get("quick_text", ""), signatures))
+
+
 def process_pdf(path, rules):
     doc = pymupdf.open(path)
     cache = _load_cache(path)
     cache_dirty = False
     pages = []
+    signatures = title_signatures(rules)
     boilerplate_pages = KNOWN_BOILERPLATE_PAGES.get(Path(path).name, set())
     for i, page in enumerate(doc, start=1):
         if i in boilerplate_pages:
@@ -869,10 +997,10 @@ def process_pdf(path, rules):
             })
             continue
         cached = cache.get(str(i))
-        if cached is not None:
+        if cached is not None and not _stale_other(cached, signatures):
             items, triage = cached["items"], cached["triage"]
         else:
-            items, triage = page_items(page)
+            items, triage = page_items(page, signatures)
             cache[str(i)] = {"items": items, "triage": triage}
             cache_dirty = True
         src = items[0]["source"] if items else ("skipped" if triage["skip"]
@@ -890,12 +1018,17 @@ def process_pdf(path, rules):
         if triage["skip"]:
             # se registra explicitamente: una pagina salteada en silencio es
             # una pagina que nadie puede auditar despues
-            rec["classification"] = {"type": None, "score": 0.0, "scores": {},
-                                     "status": "SKIPPED"}
+            cls = {"type": None, "score": 0.0, "scores": {},
+                   "status": "OTHER" if triage.get("other") else "SKIPPED"}
+            if triage.get("other"):
+                cls = _unsupported(rec, cls, triage.get("quick_text", ""), rules)
+            rec["classification"] = cls
             pages.append(rec)
             continue
 
         cls = classify(items, rules["doc_types"])
+        if not cls["type"]:
+            cls = _unsupported(rec, cls, _top_text(items), rules)
         rec["classification"] = cls
         cfg = rules["doc_types"][cls["type"]] if cls["type"] else {}
         if cls["type"]:

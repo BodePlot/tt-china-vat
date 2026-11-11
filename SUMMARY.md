@@ -66,7 +66,10 @@ Siempre con `venv/Scripts/python.exe`. `xlrd` (en el venv) lee los `.xls` viejos
    Varios documentos del mismo tipo en una exportación (`_combine_legs`): si coinciden, es un valor. Si no, los IDs
    se juntan en una lista (alcanza con que uno coincida) y los números quedan **MULTI**: no se suman ni se elige
    uno, porque pueden ser partes de un total (varias facturas) o versiones del mismo documento (CDF corregido).
-5. **Checklist**: PRESENT / MISSING (tiene extractor y no está) / MANUAL (sin extractor: no se afirma nada).
+5. **Checklist**: PRESENT / MISSING (tiene extractor y no está) / MANUAL (sin extractor: no se afirma nada) /
+   OPTIONAL y NA (no aparece y en ese tipo de exportación no se exige). Sólido o líquido sale del 包装种类 del CDF
+   (`reconciliation.shipment_kind`): 散装 = líquido, empieza con 包/袋 = sólido, otra cosa = aviso y revisión manual.
+   Con varias versiones del CDF, las reglas usan la que coincide con el refund record (`_pick_cdf_version`).
    Avisos: "mixes N different SOs" y "same document from N different files". El union-find es transitivo, así que
    un contenedor mal leído puede pegar dos exportaciones. Si las SO comparten un único CDF, el aviso dice "one CDF
    covers N SOs" (caso válido, confirmado por el equipo).
@@ -104,7 +107,24 @@ Siempre con `venv/Scripts/python.exe`. `xlrd` (en el venv) lee los `.xls` viejos
 - Medido en los 3 PDF escaneados: 117 s → 55 s, con los 33 campos idénticos. Probado y **descartado**: detección a
   ≤2000 px (pierde un contenedor), 200 DPI, sin clasificador, lotes de reconocimiento más grandes, procesos en
   paralelo (más lento).
-- Caché: `output/ocr_cache/`. La clave es ruta + mtime + tamaño + parámetros: mover o renombrar un archivo = re-OCR.
+- **Mirada rápida (Other)**: en la página escaneada se leen solo los renglones cortos del 30% de arriba. Sin palabra
+  de la firma de un tipo con campos (`title_signatures`), queda OTHER y no se paga el OCR completo. Una página girada o
+  cabeza abajo se lee completa siempre. "Read every page" en la GUI lo apaga. `samples/` + `samples2/` sin caché:
+  1930 s → 410 s (i7-10700). No detecta un documento cuyo título no esté arriba: el aviso es el MISSING del
+  checklist. Un tipo nuevo en `rules.yaml` entra solo, y la caché relee las páginas Other que ahora coincidan.
+- La guía del equipo (Documentation checking step) trae los headers del refund record y debajo la lista de documentos
+  3.x: esos nombres son `negative` de `refund_record`, sin depender del nombre del archivo. Sin ella, las SO 13349718 y
+  13368987 de `samples2/` quedan fuera del refund record: no están en List of Exports.
+- **Formatos**: `samples2/` trajo B/L y manifiesto en otros diseños. Cada formato es un tipo aparte (`bill_of_lading_port`,
+  `bill_of_lading_tanker`, `cargo_manifest_tanker`). El tanque no trae N° de B/L, SO ni viaje: se ata por 票据编号 del
+  contrato, y las reglas 5 y 6 usan el manifiesto. Un título conocido en un diseño desconocido (`format_hint`) queda
+  UNSUPPORTED: no es Other ni MISSING, sale MANUAL y en la hoja "Unknown format". Solo se agrega un formato si se repite.
+- Caché: `output/ocr_cache/`. La clave es el contenido del archivo + parámetros: mover, renombrar o tener dos copias no
+  repite el OCR.
+- Probado y **descartado** (2026-11-04): varios procesos (239 s → 215 s en `samples/`: un proceso ya usa todos los
+  núcleos) y no reconocer los renglones largos (ahí están los contenedores).
+- **Test de regresión**: `python regression.py` compara contra una foto en `output/regression/`, fuera de git.
+  `--no-cache` si se toca la lectura; `--save` cuando un cambio ya se revisó.
 
 ## Samples
 

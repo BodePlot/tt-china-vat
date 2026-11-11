@@ -69,10 +69,13 @@ rules:
       - {item: 26, ref: export_invoice.f26_spec_model}
 
   - id: 5
-    desc: "B/L number: CDF == Bill of Lading"
+    desc: "B/L number: CDF == Bill of Lading (liquids: Cargo Manifest S/O)"
     fields:
       - {item: 14, ref: customs_declaration.f14_bl_no}
       - {item: 41, ref: bill_of_lading.f41_bl_no}
+      - {item: 41, ref: bill_of_lading_port.f41_bl_no}
+      # el B/L de liquidos no trae numero: el S/O del manifiesto es el del CDF
+      - {item: null, ref: cargo_manifest_tanker.fx_bl_no}
 
   # Redefinida por el equipo (2026-09-29): antes cruzaba la modalidad del CDF
   # ("水路运输") con el buque del B/L, que nunca iban a coincidir. Ahora es
@@ -80,14 +83,18 @@ rules:
   # compare: alnum -> se ignoran espacios y "/" (el B/L trae
   # "UN9363405  510S", el CDF "UN9363405/510S").
   - id: 6
-    desc: "Conveyance name & voyage no.: CDF == Bill of Lading"
+    desc: "Conveyance name & voyage no.: CDF == Bill of Lading (liquids: Cargo Manifest)"
     compare: alnum
     fields:
       - {item: null, ref: customs_declaration.fx_conveyance_voyage,
          note: "运输工具名称及航次号 -- added at the team's request, not in rules.xlsx"}
       - {item: 42, ref: bill_of_lading.f42_conveyance_voyage}
+      - {item: 42, ref: bill_of_lading_port.f42_conveyance_voyage}
+      - {item: null, ref: cargo_manifest_tanker.fx_conveyance_voyage}
 
+  # not_for: en liquidos no hay contenedores, la regla no aplica (veredicto NA)
   - id: 7
+    not_for: liquid
     desc: >
       Container number(s): CDF == Bill of Lading == Cargo Manifest ==
       Shipping Order == Delivery Note (cross-check across 5 documents;
@@ -96,6 +103,7 @@ rules:
     fields:
       - {item: 16, ref: customs_declaration.f16_container_nos}
       - {item: 43, ref: bill_of_lading.f43_container_nos}
+      - {item: 43, ref: bill_of_lading_port.f43_container_nos}
       - {item: 45, ref: cargo_manifest_detail.f45_container_nos}
       - {item: 58, ref: shipping_order.f58_container_no}
       - {item: 65, ref: delivery_note.f65_container_nos}
@@ -122,8 +130,10 @@ rules:
   - id: 10
     desc: "Gross weight: CDF == Bill of Lading"
     fields:
-      - {item: 19, ref: customs_declaration.f19_gross_weight}
-      - {item: 44, ref: bill_of_lading.f44_gross_weight}
+      - {item: 19, ref: customs_declaration.f19_gross_weight, unit: kg}
+      - {item: 44, ref: bill_of_lading.f44_gross_weight, unit: kg}
+      - {item: 44, ref: bill_of_lading_port.f44_gross_weight, unit: kg}
+      - {item: 44, ref: bill_of_lading_tanker.f44_gross_weight, unit: ton}
 
   - id: 11
     desc: "USD amount: CDF == Refund Tool == VAT invoice (3-way cross-check)"

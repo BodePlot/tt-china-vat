@@ -9,8 +9,14 @@
 # puede saber si esta o no, y lo muestra como "revisar a mano" en vez de
 # darlo por faltante (seria una acusacion sin evidencia).
 #
-# PENDIENTE confirmar con el equipo de impuestos cuales son obligatorios
-# para dar el legajo por completo. Hasta entonces todos cuentan igual.
+# Exportaciones liquidas (reconciliation.shipment_kind), acordado con el equipo
+# de impuestos: 'liquid' dice que pasa con cada documento si no aparece.
+#   required -> falta (MISSING)
+#   manual   -> es obligatorio pero todavia no hay extractor para su formato
+#               liquido: se revisa a mano, no se lo da por faltante
+#   na       -> no aplica: no hay camiones, el producto va por caneria al buque
+#   (nada)   -> opcional: no se lo reclama
+# En los solidos todos cuentan igual.
 # =============================================================================
 
 documents:
@@ -26,10 +32,12 @@ documents:
     doc_types: [tax_filing_directory]
 
   - code: "3.2"
+    liquid: required
     name: "Export Customs Declaration Form"
     doc_types: [customs_declaration]
 
   - code: "3.3"
+    liquid: required
     name: "Export VAT Invoice"
     doc_types: [export_invoice]
 
@@ -38,6 +46,7 @@ documents:
     doc_types: [bank_receipt]
 
   - code: "3.5"
+    liquid: required
     name: "Sales and Purchase Contract"
     doc_types: [sales_contract]
 
@@ -46,26 +55,32 @@ documents:
     doc_types: [customs_clearance_expenses]
 
   - code: "3.7.1"
+    liquid: required
     name: "Bill of Lading"
-    doc_types: [bill_of_lading]
+    doc_types: [bill_of_lading, bill_of_lading_port, bill_of_lading_tanker]
 
   - code: "3.7.2"
+    liquid: required
     name: "Cargo Manifest"
-    doc_types: [cargo_manifest, cargo_manifest_detail]
+    doc_types: [cargo_manifest, cargo_manifest_detail, cargo_manifest_tanker]
 
   - code: "3.7.4.1"
+    liquid: na
     name: "Domestic Transportation Invoice"
     doc_types: [transport_invoice]
 
   - code: "3.7.4.2"
+    liquid: na
     name: "Reconciliation Statement - Domestic Transportation (LSR)"
     doc_types: [transport_statement]
 
   - code: "3.7.4.3"
+    liquid: na
     name: "Shipping Order"
     doc_types: [shipping_order]
 
   - code: "3.7.4.4"
+    liquid: na
     name: "Delivery Note"
     doc_types: [delivery_note]
 

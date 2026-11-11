@@ -38,7 +38,8 @@ STATUS_COLORS = {
     "NOT_FOUND": ("FEF2F2", "991B1B"), "CONFLICT": ("FEF2F2", "991B1B"),
     "MANUAL": ("FFEDD5", "C2410C"), "NOT_VERIFIABLE": ("FFEDD5", "C2410C"),
     "PARTIAL": ("FFEDD5", "C2410C"), "MULTI": ("FFEDD5", "C2410C"),
-    "INFO": ("F1F5F9", "475569"),
+    "INFO": ("F1F5F9", "475569"), "OPTIONAL": ("F1F5F9", "475569"),
+    "NA": ("F1F5F9", "475569"),
 }
 CONSOLIDATED_NAME = "consolidated_report.xlsx"
 
@@ -116,6 +117,7 @@ def write_report(path, shipment, source_folder, pages_by_key, log_files,
     wb = Workbook()
     summary = [
         ["Shipment", shipment["shipment"]],
+        ["Export type", shipment.get("kind") or "unknown"],
         ["Generated", datetime.now().strftime("%Y-%m-%d %H:%M")],
         ["Source folder", str(source_folder)],
         ["Documents present", count(ck, "status", "PRESENT")],
@@ -125,6 +127,7 @@ def write_report(path, shipment, source_folder, pages_by_key, log_files,
         ["Rules with discrepancy", count(shipment["rules"], "verdict", "DISCREPANCY")],
         ["Rules not verifiable", count(shipment["rules"], "verdict", "NOT_VERIFIABLE")],
         ["Rules shown for information", count(shipment["rules"], "verdict", "INFO")],
+        ["Rules not applicable", count(shipment["rules"], "verdict", "NA")],
         ["Warnings", "\n".join(shipment["warnings"]) or "none"],
         ["Folder warnings", "\n".join(folder_warnings) or "none"],
         ["Shared logs (not copied)",
@@ -167,8 +170,19 @@ def _no_documents(shipment):
     return all(rec["doc_type"] == "refund_record" for rec in shipment["records"])
 
 
+def _other_rows(results):
+    """[archivo, paginas] de lo que no esta en rules.xlsx y no se analizo."""
+    rows = []
+    for r in results:
+        pages = [p["page"] for p in r.get("pages", [])
+                 if p["classification"]["status"] == "OTHER"]
+        if pages:
+            rows.append([r["path"], ", ".join(map(str, pages))])
+    return rows
+
+
 def write_consolidated(path, shipments, source_folder, pages_by_key,
-                       unassigned=(), folder_warnings=()):
+                       unassigned=(), folder_warnings=(), other=(), unsupported=()):
     """
     Todas las exportaciones en un solo Excel (pedido del equipo de China,
     2026-09-29), para no tener que abrir el reporte de cada una:
@@ -177,6 +191,8 @@ def write_consolidated(path, shipments, source_folder, pages_by_key,
       Discrepancies   -> solo las reglas con DISCREPANCY, con el detalle
       Missing docs    -> solo los documentos MISSING
       All rules       -> todas las reglas de todas las exportaciones
+      Other           -> paginas que no son documentos de rules.xlsx
+      Unknown format  -> documentos de rules.xlsx en un formato que no se lee
     El detalle de cada una sigue en su carpeta (<SO>_report.xlsx).
     """
     count = lambda items, key, val: sum(1 for i in items if i[key] == val)
@@ -185,6 +201,7 @@ def write_consolidated(path, shipments, source_folder, pages_by_key,
         ck, rules = s["checklist"], s["rules"]
         overview.append([
             s["shipment"],
+            s.get("kind") or "",
             _claim_values(s, pages_by_key, "cdf_no"),
             _claim_values(s, pages_by_key, "refund_period"),
             _claim_values(s, pages_by_key, "amount_usd"),
@@ -198,14 +215,14 @@ def write_consolidated(path, shipments, source_folder, pages_by_key,
         ])
     wb = Workbook()
     ws = _sheet(wb, "Overview",
-                ["Shipment", "CDF (refund record)", "Refund period", "USD (refund record)",
+                ["Shipment", "Type", "CDF (refund record)", "Refund period", "USD (refund record)",
                  "VAT refunded CNY", "Docs present", "Docs missing", "Missing codes",
                  "Rules verified", "Discrepancies", "Discrepancy rules",
                  "Not verifiable", "Warnings"],
-                overview, (22, 22, 12, 16, 16, 10, 10, 24, 10, 12, 14, 12, 70), first=True)
+                overview, (22, 9, 22, 12, 16, 16, 10, 10, 24, 10, 12, 14, 12, 70), first=True)
     # una exportacion con discrepancias o documentos faltantes en rojo
     for row in ws.iter_rows(min_row=2):
-        if row[9].value or row[6].value:
+        if row[10].value or row[7].value:
             for cell in row:
                 cell.fill = PatternFill("solid", fgColor=STATUS_COLORS["DISCREPANCY"][0])
                 cell.font = Font(color=STATUS_COLORS["DISCREPANCY"][1])
@@ -228,11 +245,16 @@ def write_consolidated(path, shipments, source_folder, pages_by_key,
              "\n".join(_leg(l) for l in r["legs"])]
             for s in shipments for r in s["rules"]],
            (22, 6, 60, 16, 80), status_col=3)
+    _sheet(wb, "Other", ["File", "Pages not analyzed"], list(other), (80, 40))
+    _sheet(wb, "Unknown format", ["File", "Page", "Looks like"],
+           [[u["file"], u["page"], u["doc_type"]] for u in unsupported], (80, 8, 30))
     _sheet(wb, "Run info", ["Item", "Value"], [
         ["Generated", datetime.now().strftime("%Y-%m-%d %H:%M")],
         ["Source folder", str(source_folder)],
         ["Shipments", len(shipments)],
         ["Unassigned pages", len(unassigned)],
+        ["Files with Other pages", len(other)],
+        ["Pages in an unknown format", len(unsupported)],
         ["Folder warnings", "\n".join(folder_warnings) or "none"],
     ], (24, 90))
     wb.save(path)
@@ -274,7 +296,8 @@ def export_by_shipment(results, recon, doc_types, source_folder, dest_root=None)
                      source_folder, pages_by_key, logs,
                      recon.get("folder_warnings", ()))
     write_consolidated(run_dir / CONSOLIDATED_NAME, recon["shipments"], source_folder,
-                       pages_by_key, recon["unassigned"], recon.get("folder_warnings", ()))
+                       pages_by_key, recon["unassigned"], recon.get("folder_warnings", ()),
+                       _other_rows(results), recon.get("unsupported", ()))
 
     if recon["unassigned"]:
         d = run_dir / UNASSIGNED_DIR
