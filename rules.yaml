@@ -12,6 +12,13 @@
 #   table_col  -> columna de tabla, definida por sus headers
 # =============================================================================
 
+# Paginas de un documento conocido que no traen datos de ninguna exportacion
+# (caratula, totales). Una pagina que trae alguna de estas palabras y no es de
+# ningun tipo queda "sin datos" (SKIPPED). No es Other: el documento SI esta en
+# rules.xlsx.
+no_data_pages:
+  - "Logistics Services Report"      # estados de cuenta LSR: caratula y resumen de IVA
+
 doc_types:
 
   # ---------------------------------------------------------------------------
@@ -1061,6 +1068,13 @@ doc_types:
     label_es: "Factura de despacho aduanero (Yili Guangzhou)"
     label_zh: "代理报关 增值税专用发票"
     attach_by: lsr
+    # Factura de despacho de otro emisor (ej. Sinotrans en liquidos): no trae
+    # LSR y no se sabe leer. Queda UNSUPPORTED en vez de ignorarse. El titulo es
+    # el de cualquier factura de IVA, por eso se mira el cuerpo. Dos grupos
+    # porque el nombre del servicio viene partido en dos renglones.
+    format_hint_body:
+      - ["增值税专用发票", "代理报"]
+      - ["增值税专用发票", "报关费"]
 
     signature:
       required:
@@ -1166,6 +1180,8 @@ doc_types:
     label_es: "Estado de cuenta LSR - despacho aduanero"
     label_zh: "报关费对账单"
     per_row: true
+    # Estado de cuenta de despacho de otro emisor (ej. Sinotrans en liquidos).
+    format_hint: ["报关代理费对账单", "报关费对账单", "CUSTOMS AGENT FEE STATEMENT"]
 
     signature:
       required:

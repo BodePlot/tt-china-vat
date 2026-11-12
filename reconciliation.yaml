@@ -32,6 +32,7 @@
 rules:
 
   - id: 1
+    title: "CDF number: CDF = Refund record"
     desc: >
       Customs declaration number (CDF) == CDF number from the Refund Tool
       (the Tax Bureau refund record).
@@ -40,6 +41,7 @@ rules:
       - {item: 1, ref: refund_record.cdf_no}
 
   - id: 2
+    title: "VAT invoice number: VAT invoice = Refund record"
     desc: >
       VAT invoice number == VAT invoice number from the Refund Tool.
     fields:
@@ -49,6 +51,7 @@ rules:
   # check: false -> regla solo para MOSTRAR los datos lado a lado (veredicto
   # INFO), sin compararlos. Pedido del equipo (2026-09-29) para las 3 y 4.
   - id: 3
+    title: "Product name: CDF and VAT invoice (not compared)"
     desc: >
       Product name: CDF and VAT invoice, shown side by side, not checked
       (team's decision). The CDF reads the technical name ("均聚聚丙烯"),
@@ -59,6 +62,7 @@ rules:
       - {item: 25, ref: export_invoice.f25_product_name}
 
   - id: 4
+    title: "Product type: CDF and VAT invoice (not compared)"
     desc: >
       Product type: CDF and VAT invoice, shown side by side, not checked
       (team's decision). The CDF has the chemical spec ("4|1|白色颗粒状..."),
@@ -69,6 +73,8 @@ rules:
       - {item: 26, ref: export_invoice.f26_spec_model}
 
   - id: 5
+    title: "B/L number: CDF = Bill of Lading"
+    title_liquid: "B/L number: CDF = Cargo Manifest"
     desc: "B/L number: CDF == Bill of Lading (liquids: Cargo Manifest S/O)"
     fields:
       - {item: 14, ref: customs_declaration.f14_bl_no}
@@ -83,6 +89,8 @@ rules:
   # compare: alnum -> se ignoran espacios y "/" (el B/L trae
   # "UN9363405  510S", el CDF "UN9363405/510S").
   - id: 6
+    title: "Vessel and voyage: CDF = Bill of Lading"
+    title_liquid: "Vessel and voyage: CDF = Cargo Manifest"
     desc: "Conveyance name & voyage no.: CDF == Bill of Lading (liquids: Cargo Manifest)"
     compare: alnum
     fields:
@@ -94,6 +102,7 @@ rules:
 
   # not_for: en liquidos no hay contenedores, la regla no aplica (veredicto NA)
   - id: 7
+    title: "Container numbers: the same in all documents"
     not_for: liquid
     desc: >
       Container number(s): CDF == Bill of Lading == Cargo Manifest ==
@@ -109,6 +118,7 @@ rules:
       - {item: 65, ref: delivery_note.f65_container_nos}
 
   - id: 8
+    title: "Contract number (SO): CDF = VAT invoice"
     desc: "Contract number (SO): CDF == VAT invoice"
     fields:
       - {item: 17, ref: customs_declaration.f17_contract_no}
@@ -118,6 +128,7 @@ rules:
   # (2026-09-29) -- tienen que coincidir al centavo / al kilo. Las
   # diferencias las revisan ellos caso por caso.
   - id: 9
+    title: "Net weight: CDF = VAT invoice"
     desc: >
       Net weight (CDF, kilograms) == quantity (VAT invoice, tons). Same
       data, different units -- verified by hand: 51000 kg == 51 t in the
@@ -128,6 +139,7 @@ rules:
       - {item: 27, ref: export_invoice.f27_quantity, unit: ton}
 
   - id: 10
+    title: "Gross weight: CDF = Bill of Lading"
     desc: "Gross weight: CDF == Bill of Lading"
     fields:
       - {item: 19, ref: customs_declaration.f19_gross_weight, unit: kg}
@@ -136,6 +148,7 @@ rules:
       - {item: 44, ref: bill_of_lading_tanker.f44_gross_weight, unit: ton}
 
   - id: 11
+    title: "USD amount: CDF = Refund record = VAT invoice"
     desc: "USD amount: CDF == Refund Tool == VAT invoice (3-way cross-check)"
     fields:
       - {item: 20, ref: "customs_declaration.f20_price_block.total_price"}
@@ -143,12 +156,14 @@ rules:
       - {item: 23, ref: export_invoice.f23_amount_usd}
 
   - id: 12
+    title: "CNY amount: VAT invoice = Refund record"
     desc: "CNY amount: VAT invoice == Refund Tool"
     fields:
       - {item: 24, ref: export_invoice.f24_amount_cny}
       - {item: 9, ref: refund_record.amount_cny}
 
   - id: 13
+    title: "CDF number: VAT invoice = Refund record = CDF"
     desc: >
       CDF number on the VAT invoice == CDF number from the Refund Tool ==
       own CDF number (restates rule 1, adds the invoice field that also
@@ -159,6 +174,7 @@ rules:
       - {item: 11, ref: customs_declaration.f11_customs_no}
 
   - id: 14
+    title: "SO number: the same in all documents"
     desc: >
       SO number: customs_declaration/export_invoice/sales_contract ==
       tax_filing_directory. Not one of the 13 "Validation" rows in

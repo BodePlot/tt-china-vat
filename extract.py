@@ -926,12 +926,19 @@ def _xlsx_record(items, row, cls, cfg):
     return rec
 
 
-def _format_hint(text, rules):
+def _format_hint(text, rules, body=""):
     """Tipo cuyo format_hint aparece en el titulo: es ese documento, en un formato
-    que no sabemos leer. None si no parece ninguno."""
-    text = text.upper()
+    que no sabemos leer. None si no parece ninguno.
+    format_hint_body es para los documentos que no se distinguen por el titulo
+    (toda factura de IVA dice lo mismo arriba): lista de grupos de palabras, y
+    alcanza con que un grupo este entero en cualquier parte de la pagina."""
+    text, body = text.upper(), body.upper()
     for name, cfg in rules["doc_types"].items():
         if any(normalize(k).upper() in text for k in cfg.get("format_hint", [])):
+            return name
+    for name, cfg in rules["doc_types"].items():
+        if any(all(normalize(k).upper() in body for k in group)
+               for group in cfg.get("format_hint_body", [])):
             return name
     return None
 
@@ -943,9 +950,9 @@ def _top_text(items):
                               and i["w"] / max(i["h"], 1) < QUICK_MAX_ASPECT))
 
 
-def _unsupported(rec, cls, text, rules):
+def _unsupported(rec, cls, text, rules, body=""):
     """Marca la pagina si es un documento conocido en un formato desconocido."""
-    hint = _format_hint(text, rules)
+    hint = _format_hint(text, rules, body)
     if not hint:
         return cls
     rec["triage"] = {**rec["triage"], "reason": f"looks like {hint}: format not supported"}
@@ -1028,7 +1035,20 @@ def process_pdf(path, rules):
 
         cls = classify(items, rules["doc_types"])
         if not cls["type"]:
-            cls = _unsupported(rec, cls, _top_text(items), rules)
+            body = normalize(" ".join(i["text"] for i in items))
+            cls = _unsupported(rec, cls, _top_text(items), rules, body=body)
+            if cls["status"] == "UNSUPPORTED":
+                pass
+            elif any(normalize(k) in body for k in rules.get("no_data_pages", [])):
+                # caratula o totales de un documento conocido (rules.yaml)
+                rec["triage"] = {**rec["triage"], "reason":
+                                 "page of a known document without data (cover / totals)"}
+                cls = {**cls, "status": "SKIPPED"}
+            elif cls["status"] == "UNRESOLVED" and cls["score"] < 0.7:
+                # sin la firma completa de ningun tipo, y sin parecerse a uno
+                # conocido: no es un documento de rules.xlsx. UNRESOLVED queda
+                # solo para el empate entre dos tipos.
+                cls = {**cls, "status": "OTHER"}
         rec["classification"] = cls
         cfg = rules["doc_types"][cls["type"]] if cls["type"] else {}
         if cls["type"]:

@@ -42,8 +42,8 @@ marque otra cosa.
 | `reconciliation.yaml` | Las reglas de cruce. `check: false` = solo se muestran los datos (veredicto INFO, reglas 3 y 4). `compare: alnum` = ignora espacios y "/" (regla 6). `unit:` convierte unidades (kg/ton). |
 | `checklist.yaml` | Los 17 documentos del legajo (DS + 3.1 … 3.8.2.2) y qué doc_types cuentan como cada uno. Hoy todos tienen extractor; vacío = sin extractor → MANUAL. |
 | `organize.py` | Salida por exportación: `output/exports/<fecha_hora>/<SO>/documents/` (copias) + `<SO>_report.xlsx`. Los logs compartidos no se copian; sus filas van al reporte. Además `consolidated_report.xlsx` con todas las exportaciones (pedido del equipo de China): Overview, Discrepancies, Missing docs, All rules. |
-| `gui.py` | FreeSimpleGUI. Pestañas: Process, Results, Review (corrección manual con recorte del documento), Checklist (+ botón "Export by shipment"), Reconciliation. |
-| `review_store.py` | Correcciones manuales persistidas en `output/corrections.json`. |
+| `gui.py` | FreeSimpleGUI. Dos pestañas (desde 2026-11-11): Process y Exports. Exports = lista de exportaciones a la izquierda; a la derecha, de la elegida, sus documentos y sus reglas. Palabras simples en pantalla (Found / Missing / Match / Does not match...); los nombres cortos de las reglas salen de `title` en `reconciliation.yaml`. El detalle campo por campo ya no se muestra: está en el Excel. |
+| `review_store.py` | Correcciones manuales en `output/corrections.json`. **Sin uso desde 2026-11-11**: la GUI ya no tiene corrección manual (no llegaba al reporte y se mezclaba entre carpetas). La versión anterior de la GUI está en el commit `ce3d2a7`. |
 
 Correr: `python gui.py` · CLI: `python extract.py samples` / `python reconciliation.py samples` / `python organize.py samples`.
 Siempre con `venv/Scripts/python.exe`. `xlrd` (en el venv) lee los `.xls` viejos. `output/` y `samples2/` están en
