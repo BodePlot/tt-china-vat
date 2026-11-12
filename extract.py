@@ -41,17 +41,8 @@ QUICK_LOOK_ENABLED = True
 QUICK_TOP_FRACTION = 0.30
 QUICK_MAX_ASPECT = 25
 
-# Paginas de un archivo puntual que se saben sin datos y el triage automatico
-# NO detecta -- confirmado a mano, no adivinado. Pagina 3 de 3.7.2 Cargo
-# Manifest.pdf es texto legal de la naviera (responsabilidad por devolucion
-# de contenedor, sanciones) en pocas lineas cortas, no un parrafo grande, asi
-# que triage_page() no la marca como boilerplate (ver su umbral por altura de
-# caja) y termina corriendo OCR completo para terminar en UNRESOLVED sin
-# ningun campo (ver la nota en rules.yaml sobre 3.7.2). Se saltea directo, sin
-# gastar ni el detect-only del triage.
-KNOWN_BOILERPLATE_PAGES = {
-    "3.7.2 Cargo Manifest.pdf": {3},
-}
+# Ninguna decision depende del nombre del archivo: que se lee y que no sale solo
+# del contenido de la pagina (triage + mirada rapida).
 
 # Cache de OCR por pagina: el OCR tarda 10-25s/pagina y no cambia mientras
 # el PDF no cambie. Sin esto, iterar sobre rules.yaml significa repetir
@@ -562,6 +553,11 @@ def classify(items, doc_types, min_score=0.5, min_margin=0.15):
     if best_score < min_score or (best_score - second) < min_margin:
         return {"type": None, "score": best_score, "scores": scores,
                 "status": "UNRESOLVED"}
+    if not doc_types[best].get("fields"):
+        # reconocido, pero sin campos en rules.yaml: no es un documento de
+        # rules.xlsx (factura comercial, lista de empaque) -> Other, siempre
+        return {"type": None, "score": round(best_score, 3), "scores": scores,
+                "status": "OTHER", "not_in_rules": best}
     return {"type": best, "score": round(best_score, 3), "scores": scores,
             "status": "OK"}
 
@@ -991,18 +987,7 @@ def process_pdf(path, rules):
     cache_dirty = False
     pages = []
     signatures = title_signatures(rules)
-    boilerplate_pages = KNOWN_BOILERPLATE_PAGES.get(Path(path).name, set())
     for i, page in enumerate(doc, start=1):
-        if i in boilerplate_pages:
-            pages.append({
-                "page": i, "source": "skipped", "render_scale": 1.0,
-                "rotation": 0, "fields": {},
-                "triage": {"skip": True,
-                          "reason": "known boilerplate, see KNOWN_BOILERPLATE_PAGES"},
-                "classification": {"type": None, "score": 0.0, "scores": {},
-                                   "status": "SKIPPED"},
-            })
-            continue
         cached = cache.get(str(i))
         if cached is not None and not _stale_other(cached, signatures):
             items, triage = cached["items"], cached["triage"]
@@ -1034,7 +1019,10 @@ def process_pdf(path, rules):
             continue
 
         cls = classify(items, rules["doc_types"])
-        if not cls["type"]:
+        if cls.get("not_in_rules"):
+            rec["triage"] = {**rec["triage"], "reason":
+                             f"Other: {cls['not_in_rules']} is not in rules.xlsx"}
+        elif not cls["type"]:
             body = normalize(" ".join(i["text"] for i in items))
             cls = _unsupported(rec, cls, _top_text(items), rules, body=body)
             if cls["status"] == "UNSUPPORTED":

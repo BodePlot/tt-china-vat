@@ -42,6 +42,7 @@ marque otra cosa.
 | `reconciliation.yaml` | Las reglas de cruce. `check: false` = solo se muestran los datos (veredicto INFO, reglas 3 y 4). `compare: alnum` = ignora espacios y "/" (regla 6). `unit:` convierte unidades (kg/ton). |
 | `checklist.yaml` | Los 17 documentos del legajo (DS + 3.1 … 3.8.2.2) y qué doc_types cuentan como cada uno. Hoy todos tienen extractor; vacío = sin extractor → MANUAL. |
 | `organize.py` | Salida por exportación: `output/exports/<fecha_hora>/<SO>/documents/` (copias) + `<SO>_report.xlsx`. Los logs compartidos no se copian; sus filas van al reporte. Además `consolidated_report.xlsx` con todas las exportaciones (pedido del equipo de China): Overview, Discrepancies, Missing docs, All rules. |
+| `words.py` | Las palabras que ve el usuario (Found / Missing / Match / Does not match…), los nombres cortos de los documentos y cómo se escribe cada valor. Un solo lugar: lo usan la pantalla (`gui.py`) y el Excel (`organize.py`), así dicen lo mismo (desde 2026-11-12). |
 | `gui.py` | FreeSimpleGUI. Dos pestañas (desde 2026-11-11): Process y Exports. Exports = lista de exportaciones a la izquierda; a la derecha, de la elegida, sus documentos y sus reglas. Palabras simples en pantalla (Found / Missing / Match / Does not match...); los nombres cortos de las reglas salen de `title` en `reconciliation.yaml`. El detalle campo por campo ya no se muestra: está en el Excel. |
 | `review_store.py` | Correcciones manuales en `output/corrections.json`. **Sin uso desde 2026-11-11**: la GUI ya no tiene corrección manual (no llegaba al reporte y se mezclaba entre carpetas). La versión anterior de la GUI está en el commit `ce3d2a7`. |
 
@@ -99,8 +100,8 @@ Siempre con `venv/Scripts/python.exe`. `xlrd` (en el venv) lee los `.xls` viejos
 - RapidOCR **1.2.3**: su `__call__` **ignora** `use_det` / `use_cls` / `use_rec`. Para detectar sin reconocer hay que
   llamar a `eng.text_detector` directo (ver `_detect_only`).
 - **Triage**: detecta cajas a `TRIAGE_SCALE=0.4`. Si la mediana de altura de caja es > 250 px, es una página de
-  términos y condiciones y se saltea sin leerla. `KNOWN_BOILERPLATE_PAGES` saltea por nombre de archivo (3.7.2 pág. 3);
-  es frágil y está pendiente pasarlo a una detección por contenido.
+  términos y condiciones y se saltea sin leerla. Ninguna decisión depende del nombre del archivo: `KNOWN_BOILERPLATE_PAGES`
+  (salteaba 3.7.2 pág. 3 por nombre) se sacó el 2026-11-12; esa página ahora la descarta la mirada rápida como "Other".
 - **Rotación**: las cajas del triage detectan una página de costado. Se hace UN OCR a +90 y, si el clasificador de
   ángulo marcó >50% de las líneas como 180°, se dan vuelta las coordenadas (resultado = -90) sin releer. La
   confianza de reconocimiento NO sirve para elegir el sentido: da ~0.78 en ambos.

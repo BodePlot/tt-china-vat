@@ -6,7 +6,10 @@ extraidos).
     output/exports/<fecha_hora>/consolidated_report.xlsx   (todas las exportaciones)
     output/exports/<fecha_hora>/<SO>/documents/...
     output/exports/<fecha_hora>/<SO>/<SO>_report.xlsx
-    output/exports/<fecha_hora>/_unassigned/...      (si hay paginas sin asignar)
+    output/exports/<fecha_hora>/_no_export/...       (si hay paginas sin exportacion)
+
+Las palabras (Found, Missing, Match...) salen de words.py: son las mismas que
+muestra la pantalla.
 
 Cada corrida va a su propia carpeta con fecha y hora: nunca se pisa ni se
 borra una salida anterior. Los originales no se tocan (se copian).
@@ -26,21 +29,20 @@ from pathlib import Path
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 
-HERE = Path(__file__).resolve().parent
-UNASSIGNED_DIR = "_unassigned"
+import words
+from words import BAD, GOOD, GRAY, WARN
 
-# (fondo, texto) -- mismos colores que la GUI
-STATUS_COLORS = {
-    "PRESENT": ("F0FDF4", "166534"), "VERIFIED": ("F0FDF4", "166534"),
-    "OK": ("F0FDF4", "166534"), "OK_CORROBORATED": ("F0FDF4", "166534"),
-    "CORRECTED": ("EFF6FF", "1D4ED8"),
-    "MISSING": ("FEF2F2", "991B1B"), "DISCREPANCY": ("FEF2F2", "991B1B"),
-    "NOT_FOUND": ("FEF2F2", "991B1B"), "CONFLICT": ("FEF2F2", "991B1B"),
-    "MANUAL": ("FFEDD5", "C2410C"), "NOT_VERIFIABLE": ("FFEDD5", "C2410C"),
-    "PARTIAL": ("FFEDD5", "C2410C"), "MULTI": ("FFEDD5", "C2410C"),
-    "INFO": ("F1F5F9", "475569"), "OPTIONAL": ("F1F5F9", "475569"),
-    "NA": ("F1F5F9", "475569"),
-}
+HERE = Path(__file__).resolve().parent
+NO_EXPORT_DIR = "_no_export"
+
+# palabra -> (fondo, texto), los mismos colores que la pantalla. Las palabras
+# sin color propio (Not required, Info only...) van en gris.
+_words = [w for w, _ in (*words.DOC_STATUS.values(), *words.RULE_RESULT.values())]
+# estado de cada campo leido (hoja "Extracted data"): ahi van los codigos tal cual
+_field_status = {"OK": GOOD, "OK_CORROBORATED": GOOD, "CORRECTED": ("#EFF6FF", "#1D4ED8"),
+                 "NOT_FOUND": BAD, "CONFLICT": BAD, "PARTIAL": WARN, "MULTI": WARN}
+STATUS_COLORS = {k: (bg.lstrip("#"), fg.lstrip("#")) for k, (bg, fg) in
+                 {**dict.fromkeys(_words, GRAY), **words.WORD_COLORS, **_field_status}.items()}
 CONSOLIDATED_NAME = "consolidated_report.xlsx"
 
 
@@ -81,19 +83,16 @@ def _sheet(wb, title, head, rows, widths, status_col=None, first=False):
     return ws
 
 
-def _sources(sources):
-    by_file = {}
-    for s in sources:
-        by_file.setdefault(s["file"], []).append(s["page"])
-    return " | ".join(f"{f} ({', '.join(map(str, sorted(p)))})"
-                      for f, p in by_file.items())
+def _doc_word(item):
+    return words.DOC_STATUS[item["status"]][0]
 
 
-def _leg(leg):
-    ref = leg.get("ref") or f"item {leg.get('item')} (no extractor)"
-    if leg["status"] == "MISSING":
-        return f"{ref}: not available"
-    return f"{ref}: {_fmt(leg['value'])} [{leg['status']}]"
+def _rule_word(rule):
+    return words.RULE_RESULT[rule["verdict"]][0]
+
+
+def _rule_values(rule):
+    return "\n".join(words.rule_lines(rule))
 
 
 def _field_rows(records, pages_by_key):
@@ -103,9 +102,10 @@ def _field_rows(records, pages_by_key):
         if not page:
             continue
         if not page["fields"]:
-            rows.append([rec["file"], rec["page"], rec["doc_type"], "", "", "", "OK"])
+            rows.append([rec["file"], rec["page"], words.doc_label(rec["doc_type"]),
+                         "", "", "", "OK"])
         for fname, f in page["fields"].items():
-            rows.append([rec["file"], rec["page"], rec["doc_type"], fname,
+            rows.append([rec["file"], rec["page"], words.doc_label(rec["doc_type"]), fname,
                          _fmt(f["value"]), round(f["conf"], 2), f["status"]])
     return rows
 
@@ -115,37 +115,40 @@ def write_report(path, shipment, source_folder, pages_by_key, log_files,
     ck = shipment["checklist"]
     count = lambda items, key, val: sum(1 for i in items if i[key] == val)
     wb = Workbook()
+    rules, kind = shipment["rules"], shipment.get("kind")
     summary = [
-        ["Shipment", shipment["shipment"]],
-        ["Export type", shipment.get("kind") or "unknown"],
+        ["Export", shipment["shipment"]],
+        ["Export type", words.KIND_TEXT.get(kind, "type unknown")],
         ["Generated", datetime.now().strftime("%Y-%m-%d %H:%M")],
         ["Source folder", str(source_folder)],
-        ["Documents present", count(ck, "status", "PRESENT")],
+        ["Documents found", count(ck, "status", "PRESENT")],
         ["Documents missing", count(ck, "status", "MISSING")],
         ["Documents to check by hand", count(ck, "status", "MANUAL")],
-        ["Rules verified", count(shipment["rules"], "verdict", "VERIFIED")],
-        ["Rules with discrepancy", count(shipment["rules"], "verdict", "DISCREPANCY")],
-        ["Rules not verifiable", count(shipment["rules"], "verdict", "NOT_VERIFIABLE")],
-        ["Rules shown for information", count(shipment["rules"], "verdict", "INFO")],
-        ["Rules not applicable", count(shipment["rules"], "verdict", "NA")],
-        ["Warnings", "\n".join(shipment["warnings"]) or "none"],
-        ["Folder warnings", "\n".join(folder_warnings) or "none"],
-        ["Shared logs (not copied)",
-         "\n".join(log_files) + "\nTheir rows for this shipment are in 'Extracted data'."
+        ["Rules that match", count(rules, "verdict", "VERIFIED")],
+        ["Rules that do not match", count(rules, "verdict", "DISCREPANCY")],
+        ["Rules that could not be checked", count(rules, "verdict", "NOT_VERIFIABLE")],
+        ["Rules shown as info only", count(rules, "verdict", "INFO")],
+        ["Rules not applicable", count(rules, "verdict", "NA")],
+        ["Notes", "\n".join(shipment["warnings"]) or "none"],
+        ["Notes about the folder", "\n".join(folder_warnings) or "none"],
+        ["Shared files (not copied)",
+         "\n".join(log_files) + "\nTheir rows for this export are in 'Extracted data'."
          if log_files else "none"],
     ]
     _sheet(wb, "Summary", ["Item", "Value"], summary, (30, 90), first=True)
-    _sheet(wb, "Checklist", ["Code", "Document", "Status", "Found in"],
-           [[i["code"], i["name"], i["status"], _sources(i["sources"])] for i in ck],
-           (10, 60, 12, 70), status_col=2)
-    _sheet(wb, "Reconciliation", ["Rule", "Description", "Verdict", "Detail"],
-           [[r["id"], r["desc"], r["verdict"], "\n".join(_leg(l) for l in r["legs"])]
-            for r in shipment["rules"]],
+    # mismas columnas y mismas palabras que la pantalla
+    _sheet(wb, "Documents", ["Code", "Document", "Status", "Found in"],
+           [[i["code"], i["name"], _doc_word(i), words.sources_text(i["sources"], sep="\n")]
+            for i in ck],
+           (10, 60, 16, 70), status_col=2)
+    _sheet(wb, "Rules", ["Rule", "What is checked", "Result", "Values"],
+           [[r["id"], words.rule_title(r, kind), _rule_word(r), _rule_values(r)]
+            for r in rules],
            (6, 60, 16, 80), status_col=2)
     _sheet(wb, "Extracted data",
-           ["File", "Page / row", "Document type", "Field", "Value", "Confidence", "Status"],
+           ["File", "Page / row", "Document", "Field", "Value", "Confidence", "Status"],
            _field_rows(shipment["records"], pages_by_key),
-           (34, 10, 24, 24, 46, 11, 18), status_col=6)
+           (34, 10, 30, 24, 46, 11, 18), status_col=6)
     wb.save(path)
 
 
@@ -171,7 +174,7 @@ def _no_documents(shipment):
 
 
 def _other_rows(results):
-    """[archivo, paginas] de lo que no esta en rules.xlsx y no se analizo."""
+    """[archivo, paginas] de lo que no es un documento de rules.xlsx."""
     rows = []
     for r in results:
         pages = [p["page"] for p in r.get("pages", [])
@@ -186,13 +189,13 @@ def write_consolidated(path, shipments, source_folder, pages_by_key,
     """
     Todas las exportaciones en un solo Excel (pedido del equipo de China,
     2026-09-29), para no tener que abrir el reporte de cada una:
-      Overview        -> una fila por exportacion: lo reclamado, cuantos
-                         documentos faltan, cuantas reglas fallan, avisos
-      Discrepancies   -> solo las reglas con DISCREPANCY, con el detalle
-      Missing docs    -> solo los documentos MISSING
-      All rules       -> todas las reglas de todas las exportaciones
-      Other           -> paginas que no son documentos de rules.xlsx
-      Unknown format  -> documentos de rules.xlsx en un formato que no se lee
+      Overview                -> una fila por exportacion: lo reclamado, cuantos
+                                 documentos faltan, cuantas reglas no coinciden
+      Rules that do not match -> solo esas reglas, con sus valores
+      Missing documents       -> solo los documentos que faltan
+      All rules               -> todas las reglas de todas las exportaciones
+      Other                   -> paginas que no son documentos de rules.xlsx
+      Unknown format          -> documentos de rules.xlsx en un formato que no se lee
     El detalle de cada una sigue en su carpeta (<SO>_report.xlsx).
     """
     count = lambda items, key, val: sum(1 for i in items if i[key] == val)
@@ -201,7 +204,7 @@ def write_consolidated(path, shipments, source_folder, pages_by_key,
         ck, rules = s["checklist"], s["rules"]
         overview.append([
             s["shipment"],
-            s.get("kind") or "",
+            words.KIND_TEXT.get(s.get("kind"), ""),
             _claim_values(s, pages_by_key, "cdf_no"),
             _claim_values(s, pages_by_key, "refund_period"),
             _claim_values(s, pages_by_key, "amount_usd"),
@@ -215,48 +218,50 @@ def write_consolidated(path, shipments, source_folder, pages_by_key,
         ])
     wb = Workbook()
     ws = _sheet(wb, "Overview",
-                ["Shipment", "Type", "CDF (refund record)", "Refund period", "USD (refund record)",
-                 "VAT refunded CNY", "Docs present", "Docs missing", "Missing codes",
-                 "Rules verified", "Discrepancies", "Discrepancy rules",
-                 "Not verifiable", "Warnings"],
-                overview, (22, 9, 22, 12, 16, 16, 10, 10, 24, 10, 12, 14, 12, 70), first=True)
-    # una exportacion con discrepancias o documentos faltantes en rojo
+                ["Export", "Type", "CDF (refund record)", "Refund period",
+                 "USD (refund record)", "VAT refunded CNY", "Documents found",
+                 "Documents missing", "Missing codes", "Rules that match",
+                 "Rules that do not match", "Rule numbers",
+                 "Rules that could not be checked", "Notes"],
+                overview, (22, 16, 22, 12, 16, 16, 11, 11, 24, 10, 12, 14, 14, 70), first=True)
+    # una exportacion con reglas que no coinciden o documentos faltantes, en rojo
     for row in ws.iter_rows(min_row=2):
         if row[10].value or row[7].value:
             for cell in row:
-                cell.fill = PatternFill("solid", fgColor=STATUS_COLORS["DISCREPANCY"][0])
-                cell.font = Font(color=STATUS_COLORS["DISCREPANCY"][1])
-    _sheet(wb, "Discrepancies", ["Shipment", "Rule", "Description", "Detail"],
-           [[s["shipment"], r["id"], r["desc"], "\n".join(_leg(l) for l in r["legs"])]
+                cell.fill = PatternFill("solid", fgColor=STATUS_COLORS["Missing"][0])
+                cell.font = Font(color=STATUS_COLORS["Missing"][1])
+    _sheet(wb, "Rules that do not match", ["Export", "Rule", "What is checked", "Values"],
+           [[s["shipment"], r["id"], words.rule_title(r, s.get("kind")), _rule_values(r)]
             for s in shipments for r in s["rules"] if r["verdict"] == "DISCREPANCY"],
            (22, 6, 60, 80))
     # una exportacion sin NINGUN documento va en una sola fila, no 16
     missing = []
     for s in shipments:
         if _no_documents(s):
-            missing.append([s["shipment"], "ALL", "claimed in the refund record, "
-                                                  "no documents found in the folder"])
+            missing.append([s["shipment"], "all", "in the refund record, but none of "
+                                                  "its documents are in the folder"])
             continue
         missing += [[s["shipment"], i["code"], i["name"]]
                     for i in s["checklist"] if i["status"] == "MISSING"]
-    _sheet(wb, "Missing docs", ["Shipment", "Code", "Document"], missing, (22, 10, 70))
-    _sheet(wb, "All rules", ["Shipment", "Rule", "Description", "Verdict", "Detail"],
-           [[s["shipment"], r["id"], r["desc"], r["verdict"],
-             "\n".join(_leg(l) for l in r["legs"])]
+    _sheet(wb, "Missing documents", ["Export", "Code", "Document"], missing, (22, 10, 70))
+    _sheet(wb, "All rules", ["Export", "Rule", "What is checked", "Result", "Values"],
+           [[s["shipment"], r["id"], words.rule_title(r, s.get("kind")), _rule_word(r),
+             _rule_values(r)]
             for s in shipments for r in s["rules"]],
            (22, 6, 60, 16, 80), status_col=3)
-    _sheet(wb, "Other", ["File", "Pages not analyzed"], list(other), (80, 40))
-    _sheet(wb, "Unknown format", ["File", "Page", "Looks like"],
-           [[u["file"], u["page"], u["doc_type"]] for u in unsupported], (80, 8, 30))
+    _sheet(wb, "Other", ["File (not a document of rules.xlsx)", "Pages"], list(other), (80, 40))
+    _sheet(wb, words.UNKNOWN_FORMAT, ["File", "Page", "Looks like"],
+           [[u["file"], u["page"], words.doc_label(u["doc_type"])] for u in unsupported],
+           (80, 8, 40))
     _sheet(wb, "Run info", ["Item", "Value"], [
         ["Generated", datetime.now().strftime("%Y-%m-%d %H:%M")],
         ["Source folder", str(source_folder)],
-        ["Shipments", len(shipments)],
-        ["Unassigned pages", len(unassigned)],
+        ["Exports", len(shipments)],
+        ["Pages that belong to no export", len(unassigned)],
         ["Files with Other pages", len(other)],
         ["Pages in an unknown format", len(unsupported)],
-        ["Folder warnings", "\n".join(folder_warnings) or "none"],
-    ], (24, 90))
+        ["Notes about the folder", "\n".join(folder_warnings) or "none"],
+    ], (30, 90))
     wb.save(path)
 
 
@@ -300,13 +305,14 @@ def export_by_shipment(results, recon, doc_types, source_folder, dest_root=None)
                        _other_rows(results), recon.get("unsupported", ()))
 
     if recon["unassigned"]:
-        d = run_dir / UNASSIGNED_DIR
+        d = run_dir / NO_EXPORT_DIR
         copy(sorted({u["file"] for u in recon["unassigned"]}), d / "documents")
         wb = Workbook()
-        _sheet(wb, "Unassigned pages", ["File", "Page / row", "Document type"],
-               [[u["file"], u["page"], u["doc_type"]] for u in recon["unassigned"]],
-               (50, 10, 30), first=True)
-        wb.save(d / "unassigned_pages.xlsx")
+        _sheet(wb, words.NO_EXPORT, ["File", "Page / row", "Document", "Why"],
+               [[u["file"], u["page"], words.doc_label(u["doc_type"]), u.get("reason", "")]
+                for u in recon["unassigned"]],
+               (50, 10, 34, 60), first=True)
+        wb.save(d / "pages_with_no_export.xlsx")
     return run_dir
 
 

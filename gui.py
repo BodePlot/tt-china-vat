@@ -25,6 +25,9 @@ import yaml
 import extract
 import organize
 import reconciliation
+from words import (BAD, DOC_STATUS, GOOD, GRAY, KIND_TEXT, NO_EXPORT, NOT_READ,
+                   RULE_RESULT, UNKNOWN_FORMAT, WARN, WORD_COLORS, doc_label,
+                   leg_lines, plural, rule_lines, rule_title, sources_text)
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE          # el proyecto es plano: samples/ y output/ viven al lado de gui.py
@@ -46,136 +49,11 @@ BOLD = ("Segoe UI", 10, "bold")
 
 
 # =============================================================================
-# Palabras que ve el usuario
-# =============================================================================
-# Los modulos trabajan con codigos (PRESENT, NOT_VERIFIABLE...). En pantalla
-# va una palabra simple y, al hacer click en la fila, una frase que la explica.
-DOC_STATUS = {
-    "PRESENT": ("Found", "the document is in the folder."),
-    "MISSING": ("Missing", "the document was not found in the folder."),
-    "MANUAL": ("Check by hand", "the tool cannot read this document. "
-                                "Open it and check it by hand."),
-    "OPTIONAL": ("Not required", "not found, and not required for this type of export."),
-    "NA": ("Not applicable", "does not apply to this type of export."),
-}
-RULE_RESULT = {
-    "VERIFIED": ("Match", "the values are the same."),
-    "DISCREPANCY": ("Does not match", "the values are different."),
-    "NOT_VERIFIABLE": ("Could not check", "a document is missing or a value "
-                                          "could not be read."),
-    "INFO": ("Info only", "shown side by side, not compared (team's decision)."),
-    "NA": ("Not applicable", "this rule does not apply to this type of export."),
-}
-LEG_NOTES = {"LOSSY": "digits lost in the Excel file", "LOW_CONF": "unclear reading"}
-KIND_TEXT = {"liquid": "liquid", "solid": "solid (containers)",
-             "unknown": "type unknown"}
-
-NO_EXPORT, NOT_READ, UNKNOWN_FORMAT = "No export", "Not read", "Unknown format"
-
-# (fondo, texto)
-GOOD, BAD = ("#F0FDF4", "#166534"), ("#FEF2F2", "#991B1B")
-WARN, GRAY = ("#FFEDD5", "#C2410C"), ("#F1F5F9", "#475569")
-WORD_COLORS = {"Found": GOOD, "Match": GOOD,
-               "Missing": BAD, "Does not match": BAD, NOT_READ: BAD,
-               "Check by hand": WARN, "Could not check": WARN, NO_EXPORT: WARN,
-               UNKNOWN_FORMAT: WARN}
-
-# nombre corto de cada documento, con su codigo de rules.xlsx adelante
-DOC_LABELS = {
-    "refund_record": "Refund record",
-    "tax_filing_directory": "3.1 Filing Directory",
-    "customs_declaration": "3.2 CDF",
-    "export_invoice": "3.3 VAT invoice",
-    "bank_receipt": "3.4 Bank Receipt",
-    "sales_contract": "3.5 Sales Contract",
-    "customs_clearance_expenses": "3.6 Customs Clearance Expenses",
-    "bill_of_lading": "3.7.1 Bill of Lading",
-    "bill_of_lading_port": "3.7.1 Bill of Lading",
-    "bill_of_lading_tanker": "3.7.1 Bill of Lading",
-    "cargo_manifest": "3.7.2 Cargo Manifest",
-    "cargo_manifest_detail": "3.7.2 Cargo Manifest",
-    "cargo_manifest_tanker": "3.7.2 Cargo Manifest",
-    "transport_invoice": "3.7.4.1 Transportation Invoice",
-    "transport_statement": "3.7.4.2 Transportation Statement",
-    "shipping_order": "3.7.4.3 Shipping Order",
-    "delivery_note": "3.7.4.4 Delivery Note",
-    "coordination_fee_invoice": "3.7.5.1 Coordination Fee Invoice",
-    "coordination_fee_statement": "3.7.5.2 Coordination Fee Statement",
-    "customs_fee_invoice": "3.8.2.1 Customs Declaration Fee Invoice",
-    "customs_fee_statement": "3.8.2.2 Customs Declaration Fee Statement",
-}
-
-
-def doc_label(doc_type):
-    return DOC_LABELS.get(doc_type) or str(doc_type).replace("_", " ").capitalize()
-
-
-def plural(n, one, many):
-    return f"{n} {one if n == 1 else many}"
-
-
-# =============================================================================
 # Datos -> filas
 # =============================================================================
-def _sources_text(sources, sep="   |   "):
-    """[{file, page}] -> '3.7.4.3 Shipping Order.xlsx (rows 3, 4)'. En un
-    xlsx 'page' es el numero de fila (ver extract.process_xlsx)."""
-    by_file = {}
-    for s in sources:
-        by_file.setdefault(s["file"], []).append(s["page"])
-    parts = []
-    for f, pages in by_file.items():
-        excel = f.lower().endswith((".xlsx", ".xls"))
-        unit = ("row" if len(pages) == 1 else "rows") if excel else "p."
-        parts.append(f"{f} ({unit} {', '.join(map(str, sorted(pages)))})")
-    return sep.join(parts)
-
-
-def _leg_value(leg):
-    """El valor de una pata, sin '.0' en enteros y con la unidad pegada
-    (51000.0 en kg se lee '51000 kg')."""
-    v = leg["value"]
-    if isinstance(v, list):
-        text = ", ".join(str(x) for x in v)
-    elif isinstance(v, dict):
-        text = ", ".join(f"{k}={x}" for k, x in v.items())
-    else:
-        if isinstance(v, float) and v.is_integer():
-            v = int(v)
-        text = "" if v is None else str(v)
-    unit = leg.get("unit")
-    return f"{text} {unit}" if unit else text
-
-
-def _leg_lines(legs, with_item=False, only_values=False):
-    """
-    Una linea por documento de la regla: '3.2 CDF: 51000 kg'.
-    Un documento con varios formatos (hay 3 de Bill of Lading) tiene una pata
-    por formato: se muestra solo la que trajo valor, no las otras vacias.
-    with_item agrega el item de rules.xlsx (1-84), para ir directo a esa fila.
-    only_values deja solo los valores: sin los documentos que no trajeron
-    ninguno y sin la nota de lectura dudosa.
-    """
-    groups = {}
-    for leg in legs:
-        label = doc_label(leg["ref"].split(".")[0]) if leg.get("ref") else "(no reader)"
-        groups.setdefault(label, []).append(leg)
-    lines = []
-    for label, group in groups.items():
-        found = [l for l in group if l["status"] != "MISSING"]
-        for leg in found or ([] if only_values else group[:1]):
-            name = label
-            if with_item and leg.get("item") is not None:
-                name = f"{label}, item {leg['item']}"
-            if leg["status"] == "MISSING":
-                lines.append(f"{name}: no value")
-                continue
-            note = None if only_values else LEG_NOTES.get(leg["status"])
-            lines.append(f"{name}: {_leg_value(leg)}" + (f" ({note})" if note else ""))
-    return lines
-
-
-def _export_entry(s, titles):
+# Las palabras (Found, Missing, Match...) estan en words.py: las mismas que
+# usa el Excel.
+def _export_entry(s):
     """Una exportacion -> lo que se muestra de ella (fila de la lista + panel)."""
     count = lambda items, key, val: sum(1 for i in items if i[key] == val)
     missing = count(s["checklist"], "status", "MISSING")
@@ -201,23 +79,20 @@ def _export_entry(s, titles):
     docs, doc_details = [], []
     for i in s["checklist"]:
         word, why = DOC_STATUS[i["status"]]
-        docs.append([i["code"], i["name"], word, _sources_text(i["sources"])])
-        found = _sources_text(i["sources"], sep="\n   ")
+        docs.append([i["code"], i["name"], word, sources_text(i["sources"])])
+        found = sources_text(i["sources"], sep="\n   ")
         doc_details.append(f"{i['code']}  {i['name']}\n{word}: {why}"
                            + (f"\nFound in:\n   {found}" if found else ""))
 
     rules, rule_details = [], []
     for r in s["rules"]:
         word, why = RULE_RESULT[r["verdict"]]
-        title = (titles.get((r["id"], s.get("kind"))) or titles.get((r["id"], None))
-                 or r["desc"])
-        if r["verdict"] == "NA":
-            shown, full = [], []
-        else:
-            # en la tabla, una regla que coincide muestra lo que se comparo; los
-            # documentos que no trajeron valor se ven al hacer click en la fila
-            shown = _leg_lines(r["legs"], only_values=r["verdict"] == "VERIFIED")
-            full = _leg_lines(r["legs"], with_item=True)
+        title = rule_title(r, s.get("kind"))
+        # en la tabla, una regla que coincide muestra lo que se comparo; los
+        # documentos que no trajeron valor se ven al hacer click en la fila
+        shown = ([] if r["verdict"] == "NA" else
+                 leg_lines(r["legs"], only_values=r["verdict"] == "VERIFIED"))
+        full = rule_lines(r)
         rules.append([r["id"], title, word, "   |   ".join(shown)])
         rule_details.append("\n   ".join([f"Rule {r['id']}  —  {title}\n{word}: {why}"]
                                          + full))
@@ -245,14 +120,14 @@ def _special_entry(label, color, title, summary, rows):
             "rules": [], "rule_details": [], "notes": []}
 
 
-def build_entries(recon, results, titles):
+def build_entries(recon, results):
     """
     Todo lo que va en la lista de la izquierda, en orden:
       las exportaciones, las paginas que no son de ninguna exportacion y lo
       que no se pudo leer. Sin esas dos ultimas, un archivo roto solo se veria
       como un documento "Missing" y nadie sabria por que.
     """
-    entries = [_export_entry(s, titles) for s in recon["shipments"]]
+    entries = [_export_entry(s) for s in recon["shipments"]]
 
     # paginas sin exportacion: una fila por (documento, archivo, motivo)
     loose = {}
@@ -260,7 +135,7 @@ def build_entries(recon, results, titles):
         key = (doc_label(u["doc_type"]), u["file"], u.get("reason", ""))
         loose.setdefault(key, []).append(u)
     if loose:
-        rows = [(doc, NO_EXPORT, f"{_sources_text(pages)}  —  {reason}")
+        rows = [(doc, NO_EXPORT, f"{sources_text(pages)}  —  {reason}")
                 for (doc, _, reason), pages in loose.items()]
         entries.append(_special_entry(
             NO_EXPORT, WARN, "Pages that belong to no export",
@@ -273,7 +148,7 @@ def build_entries(recon, results, titles):
     unknown = {}
     for u in recon.get("unsupported", ()):
         unknown.setdefault((doc_label(u["doc_type"]), u["file"]), []).append(u)
-    rows += [(doc, UNKNOWN_FORMAT, _sources_text(pages))
+    rows += [(doc, UNKNOWN_FORMAT, sources_text(pages))
              for (doc, _), pages in unknown.items()]
     if rows:
         entries.append(_special_entry(
@@ -418,14 +293,6 @@ def main():
     rules = yaml.safe_load(open(HERE / "rules.yaml", encoding="utf-8"))
     recon_rules = reconciliation.load_rules(HERE / "reconciliation.yaml")
     checklist_docs = reconciliation.load_checklist(HERE / "checklist.yaml")
-    # nombre corto de cada regla; 'title_liquid' es el de las exportaciones
-    # de liquidos cuando la regla usa otro documento (ver reconciliation.yaml)
-    titles = {}
-    for r in recon_rules:
-        if r.get("title"):
-            titles[(r["id"], None)] = r["title"]
-        if r.get("title_liquid"):
-            titles[(r["id"], "liquid")] = r["title_liquid"]
 
     layout = [
         [sg.TabGroup([[sg.Tab("1. Process", tab_process(), key="-TAB_PROCESS-"),
@@ -520,7 +387,7 @@ def main():
                 results = payload
                 recon = reconciliation.run(results, recon_rules,
                                            rules["doc_types"], checklist_docs)
-                all_entries = build_entries(recon, results, titles)
+                all_entries = build_entries(recon, results)
                 n_empty = sum(1 for e in all_entries if e["empty"])
                 win["-SHOW_EMPTY-"].update(
                     value=False, visible=bool(n_empty),

@@ -548,7 +548,7 @@ def _warnings(cluster, checklist, doc_types, claims_loaded):
                    "valid case, shown for information")
     elif len(sos) > 1:
         out.append(f"mixes {len(sos)} different SOs ({', '.join(sos)}) -- "
-                   "check that these documents belong to the same shipment")
+                   "check that these documents belong to the same export")
     # single_file: lo cubre folder_warnings(); multiple: es normal que haya
     # varios (ej. un Delivery Note por camion)
     single = {dt for dt, cfg in doc_types.items()
@@ -609,7 +609,7 @@ def _attach(clusters, attachables, doc_types):
             hits = [i for i, c in enumerate(clusters)
                     if mine & {v for r in c for v in _field_values(r, suffix)}]
             reason = (f"{how.upper()} {', '.join(sorted(mine)) or '(not read)'} does "
-                      "not match any shipment in the folder")
+                      "not match any export in the folder")
         elif how == "amount_usd":
             amount = next((f["value"] for n, f in rec["fields"].items()
                            if n.endswith("_amount") and f.get("value") is not None), None)
@@ -617,11 +617,11 @@ def _attach(clusters, attachables, doc_types):
                     if amount is not None
                     and any(_numbers_close(amount, a) for a in _shipment_amounts_usd(c))]
             if len(hits) > 1:
-                reason = (f"amount USD {amount:,.2f} matches {len(hits)} shipments -- "
+                reason = (f"amount USD {amount:,.2f} matches {len(hits)} exports -- "
                           "can't tell which one without an SO or CDF on the receipt")
                 hits = []
             else:
-                reason = f"amount USD {amount} matches no shipment"
+                reason = f"amount USD {amount} matches no export"
         else:
             hits, reason = [], f"unknown attach_by '{how}'"
         for i in hits:
@@ -729,8 +729,11 @@ def run(results, rules=None, doc_types=None, documents=None):
         active, version_notes = _pick_cdf_version(cluster)
         kind_notes = ["could not tell solid from liquid (packing type on the CDF) -- "
                       "the checklist assumes solid, check by hand"] if kind == "unknown" else []
-        format_notes = [f"a document in this folder looks like {h} in a format the "
-                        "tool can't read yet -- check by hand" for h in hints
+        # el documento con su codigo y nombre de rules.xlsx, no el nombre interno
+        doc_name = lambda h: next((f"{i['code']} {i['name']}" for i in checklist
+                                   if h in i["doc_types"]), h)
+        format_notes = [f"a document in this folder looks like {doc_name(h)} in a format "
+                        "the tool can't read yet -- check by hand" for h in hints
                         if not any(h in i["doc_types"] and i["status"] == PRESENT
                                    for i in checklist)]
         shipments.append({
