@@ -26,8 +26,9 @@ import extract
 import organize
 import reconciliation
 from words import (BAD, DOC_STATUS, GOOD, GRAY, KIND_TEXT, NO_EXPORT, NOT_READ,
-                   RULE_RESULT, UNKNOWN_FORMAT, WARN, WORD_COLORS, doc_label,
-                   leg_lines, plural, rule_lines, rule_title, sources_text)
+                   NOT_READ_FULL, RULE_RESULT, UNKNOWN_FORMAT, WARN, WORD_COLORS, doc_label,
+                   leg_lines, not_read_why, plural, rule_lines, rule_title,
+                   sources_text)
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE          # el proyecto es plano: samples/ y output/ viven al lado de gui.py
@@ -97,12 +98,23 @@ def _export_entry(s):
         rule_details.append("\n   ".join([f"Rule {r['id']}  —  {title}\n{word}: {why}"]
                                          + full))
 
+    # el titulo dice que es cada numero: Shipping Order (3.7.4.3) y CDF (3.2).
+    # Una exportacion sin Shipping Order ya se llama "CDF ..." (reconciliation)
     kind = KIND_TEXT.get(s.get("kind"))
+    if s.get("sos"):
+        title = [f"Shipping Order {s['shipment']}",
+                 s["cdfs"] and "CDF " + ", ".join(s["cdfs"])]
+    else:
+        title = [str(s["shipment"])]
+    title = "   ·   ".join(p for p in title + [kind] if p)
     return {
-        "row": [s["shipment"], "all" if empty else missing, "" if empty else mismatch],
+        # la ultima columna explica el naranja: todo lo que una persona tiene que
+        # mirar (documentos "Check by hand" + reglas "Could not check")
+        "row": [s["shipment"], "all" if empty else missing, "" if empty else mismatch,
+                "" if empty else by_hand + unchecked],
         "color": BAD if missing or mismatch or empty
         else WARN if by_hand or unchecked else GOOD,
-        "title": f"Export {s['shipment']}" + (f"   ·   {kind}" if kind else ""),
+        "title": title,
         "summary": summary, "empty": empty,
         "docs": docs, "doc_details": doc_details,
         "rules": rules, "rule_details": rule_details,
@@ -113,7 +125,7 @@ def _export_entry(s):
 def _special_entry(label, color, title, summary, rows):
     """Entrada de la lista que no es una exportacion (paginas sueltas, archivos
     que no se pudieron leer). rows = [documento, estado, donde]."""
-    return {"row": [f"{label}: {len(rows)}", "", ""], "color": color,
+    return {"row": [f"{label}: {len(rows)}", "", "", ""], "color": color,
             "title": title, "summary": summary, "empty": False,
             "docs": [["", doc, word, where] for doc, word, where in rows],
             "doc_details": [f"{doc}\n{word}\n   {where}" for doc, word, where in rows],
@@ -123,9 +135,10 @@ def _special_entry(label, color, title, summary, rows):
 def build_entries(recon, results):
     """
     Todo lo que va en la lista de la izquierda, en orden:
-      las exportaciones, las paginas que no son de ninguna exportacion y lo
-      que no se pudo leer. Sin esas dos ultimas, un archivo roto solo se veria
-      como un documento "Missing" y nadie sabria por que.
+      las exportaciones, las paginas que no son de ninguna exportacion, los
+      documentos en un formato desconocido y los archivos que no abrieron.
+      Sin esas tres ultimas, un archivo roto solo se veria como un documento
+      "Missing" y nadie sabria por que.
     """
     entries = [_export_entry(s) for s in recon["shipments"]]
 
@@ -142,29 +155,38 @@ def build_entries(recon, results):
             "The tool could not link these pages to any export. Check them by hand.",
             rows))
 
-    rows = [("(whole file)", NOT_READ,
-             f"{r['path']}  —  {r.get('error') or 'the file could not be opened'}")
-            for r in results if not r.get("ok")]
+    # documento reconocido, pero en un formato que no se sabe leer: el archivo
+    # esta bien
     unknown = {}
     for u in recon.get("unsupported", ()):
         unknown.setdefault((doc_label(u["doc_type"]), u["file"]), []).append(u)
-    rows += [(doc, UNKNOWN_FORMAT, sources_text(pages))
-             for (doc, _), pages in unknown.items()]
-    if rows:
+    if unknown:
         entries.append(_special_entry(
-            NOT_READ, BAD, "Files the tool could not read",
-            "Files that could not be opened, and documents in a format the tool "
-            "cannot read yet. Open them and check them by hand.",
-            rows))
+            UNKNOWN_FORMAT, WARN, "Documents in a format the tool cannot read yet",
+            "The files are fine and the tool knows which documents they are, but "
+            "not this layout. Check them by hand.",
+            [(doc, UNKNOWN_FORMAT, sources_text(pages))
+             for (doc, _), pages in unknown.items()]))
+
+    # el archivo no abrio: no se sabe que tiene adentro
+    broken = [("(whole file)", NOT_READ,
+               f"{r['path']}  —  {not_read_why(r.get('error'))}")
+              for r in results if not r.get("ok")]
+    if broken:
+        entries.append(_special_entry(
+            NOT_READ_FULL, BAD, "Files that could not be opened",
+            "Broken or password-protected files: nothing was read from them. "
+            "Get the files again, or check them by hand.",
+            broken))
     return entries
 
 
 # =============================================================================
 # Tablas: recorte de texto
 # =============================================================================
-LIST_WIDTHS = [22, 11, 10]
-DOCS_WIDTHS = [8, 48, 14, 40]
-RULES_WIDTHS = [5, 40, 14, 51]
+LIST_WIDTHS = [20, 11, 10, 12]
+DOCS_WIDTHS = [8, 48, 14, 34]
+RULES_WIDTHS = [5, 40, 14, 45]
 
 
 def _truncate(text, px, font):
@@ -238,7 +260,8 @@ def tab_exports():
     # tablas ya ocupan todo el alto de una pantalla de notebook
     left = sg.Column([
         [sg.Table(values=[], key="-LIST-",
-                  headings=["Export", "Missing docs", "Mismatches"],
+                  headings=["Shipping Order", "Missing docs", "Mismatches",
+                            "Check by hand"],
                   col_widths=LIST_WIDTHS, num_rows=19, **table)],
         [sg.Checkbox("Show exports with no documents", key="-SHOW_EMPTY-",
                      enable_events=True, visible=False)],
@@ -255,9 +278,10 @@ def tab_exports():
 
     right = sg.Column([
         [sg.Text("Process a folder to see its exports.", key="-TITLE-",
-                 font=("Segoe UI", 13, "bold"), size=(70, 1), pad=(5, 0))],
-        [sg.Text("", key="-SUMMARY-", font=("Segoe UI", 11), size=(110, 1),
-                 pad=(5, (0, 4)))],
+                 font=("Segoe UI", 13, "bold"), size=(70, 1), pad=(5, 0),
+                 expand_x=True)],
+        [sg.Text("", key="-SUMMARY-", font=("Segoe UI", 11), size=(90, 1),
+                 pad=(5, (0, 4)), expand_x=True)],
         [sg.Text("DOCUMENTS", font=BOLD, text_color=C["muted"], pad=(5, (4, 2)))],
         [sg.Table(values=[], key="-DOCS-",
                   headings=["Code", "Document", "Status", "Found in"],

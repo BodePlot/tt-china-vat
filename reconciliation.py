@@ -738,6 +738,9 @@ def run(results, rules=None, doc_types=None, documents=None):
                                    for i in checklist)]
         shipments.append({
             "shipment": _cluster_label(cluster),
+            # los numeros que identifican la exportacion, para mostrarlos
+            "sos": sorted({v for rec in cluster for v in _key_values(rec, "so")}),
+            "cdfs": sorted({v for rec in cluster for v in _key_values(rec, "cdf")}),
             "kind": kind,
             "doc_types": sorted({rec["doc_type"] for rec in cluster}),
             "files": sorted({rec["file"] for rec in cluster}),

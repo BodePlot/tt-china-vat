@@ -184,8 +184,45 @@ def _other_rows(results):
     return rows
 
 
+# por que una pagina no trae datos, en palabras simples (el motivo tecnico lo
+# pone extract.py)
+NO_DATA_WHY = {
+    "boilerplate (paragraph-sized boxes)": "legal text (long paragraphs)",
+    "page of a known document without data (cover / totals)": "cover or totals page",
+    "statement page without rows (cover / totals)": "cover or totals page",
+}
+
+
+def _no_data_rows(results):
+    """[archivo, paginas, motivo] de las paginas de un documento que no traen
+    datos de ninguna exportacion: letra chica legal, caratulas, totales."""
+    groups = {}
+    for r in results:
+        for p in r.get("pages", []):
+            if p["classification"]["status"] == "SKIPPED":
+                why = p.get("triage", {}).get("reason") or "no data on the page"
+                groups.setdefault((r["path"], NO_DATA_WHY.get(why, why)), []).append(
+                    p.get("pdf_page", p["page"]))
+    return [[f, ", ".join(map(str, sorted(set(pages)))), why]
+            for (f, why), pages in groups.items()]
+
+
+def _no_export_rows(unassigned):
+    return [[u["file"], u["page"], words.doc_label(u["doc_type"]), u.get("reason", "")]
+            for u in unassigned]
+
+
+def _not_read_rows(results):
+    """[archivo, motivo, error tecnico] de los archivos que no se pudieron
+    abrir. El motivo es la misma frase que muestra la pantalla; el error
+    tecnico es para quien mantiene la herramienta."""
+    return [[r["path"], words.not_read_why(r.get("error")), r.get("error") or ""]
+            for r in results if not r.get("ok")]
+
+
 def write_consolidated(path, shipments, source_folder, pages_by_key,
-                       unassigned=(), folder_warnings=(), other=(), unsupported=()):
+                       unassigned=(), folder_warnings=(), other=(), unsupported=(),
+                       no_data=(), not_read=()):
     """
     Todas las exportaciones en un solo Excel (pedido del equipo de China,
     2026-09-29), para no tener que abrir el reporte de cada una:
@@ -195,7 +232,12 @@ def write_consolidated(path, shipments, source_folder, pages_by_key,
       Missing documents       -> solo los documentos que faltan
       All rules               -> todas las reglas de todas las exportaciones
       Other                   -> paginas que no son documentos de rules.xlsx
+      Pages without data      -> paginas sin datos de ninguna exportacion (letra
+                                 chica legal, caratulas, totales)
       Unknown format          -> documentos de rules.xlsx en un formato que no se lee
+      No export               -> paginas que no se pudieron unir a ninguna exportacion
+      Not read (broken file)  -> archivos que no se pudieron abrir
+    Con esas cinco listas, todo lo que no se uso queda anotado aca.
     El detalle de cada una sigue en su carpeta (<SO>_report.xlsx).
     """
     count = lambda items, key, val: sum(1 for i in items if i[key] == val)
@@ -250,16 +292,23 @@ def write_consolidated(path, shipments, source_folder, pages_by_key,
             for s in shipments for r in s["rules"]],
            (22, 6, 60, 16, 80), status_col=3)
     _sheet(wb, "Other", ["File (not a document of rules.xlsx)", "Pages"], list(other), (80, 40))
+    _sheet(wb, "Pages without data", ["File", "Pages", "Why"], list(no_data), (80, 30, 40))
     _sheet(wb, words.UNKNOWN_FORMAT, ["File", "Page", "Looks like"],
            [[u["file"], u["page"], words.doc_label(u["doc_type"])] for u in unsupported],
            (80, 8, 40))
+    _sheet(wb, words.NO_EXPORT, ["File", "Page / row", "Document", "Why"],
+           _no_export_rows(unassigned), (60, 10, 34, 60))
+    _sheet(wb, words.NOT_READ_FULL, ["File", "Why", "Technical detail"],
+           list(not_read), (60, 60, 80))
     _sheet(wb, "Run info", ["Item", "Value"], [
         ["Generated", datetime.now().strftime("%Y-%m-%d %H:%M")],
         ["Source folder", str(source_folder)],
         ["Exports", len(shipments)],
         ["Pages that belong to no export", len(unassigned)],
         ["Files with Other pages", len(other)],
+        ["Files with pages without data", len({r[0] for r in no_data})],
         ["Pages in an unknown format", len(unsupported)],
+        ["Files that could not be opened", len(not_read)],
         ["Notes about the folder", "\n".join(folder_warnings) or "none"],
     ], (30, 90))
     wb.save(path)
@@ -302,16 +351,15 @@ def export_by_shipment(results, recon, doc_types, source_folder, dest_root=None)
                      recon.get("folder_warnings", ()))
     write_consolidated(run_dir / CONSOLIDATED_NAME, recon["shipments"], source_folder,
                        pages_by_key, recon["unassigned"], recon.get("folder_warnings", ()),
-                       _other_rows(results), recon.get("unsupported", ()))
+                       _other_rows(results), recon.get("unsupported", ()),
+                       _no_data_rows(results), _not_read_rows(results))
 
     if recon["unassigned"]:
         d = run_dir / NO_EXPORT_DIR
         copy(sorted({u["file"] for u in recon["unassigned"]}), d / "documents")
         wb = Workbook()
         _sheet(wb, words.NO_EXPORT, ["File", "Page / row", "Document", "Why"],
-               [[u["file"], u["page"], words.doc_label(u["doc_type"]), u.get("reason", "")]
-                for u in recon["unassigned"]],
-               (50, 10, 34, 60), first=True)
+               _no_export_rows(recon["unassigned"]), (50, 10, 34, 60), first=True)
         wb.save(d / "pages_with_no_export.xlsx")
     return run_dir
 

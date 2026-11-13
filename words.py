@@ -32,6 +32,29 @@ KIND_TEXT = {"liquid": "liquid", "solid": "solid (containers)",
              "unknown": "type unknown"}
 
 NO_EXPORT, NOT_READ, UNKNOWN_FORMAT = "No export", "Not read", "Unknown format"
+# "Not read" solo, no dice por que: donde hay lugar (lista de la pantalla, hoja
+# del Excel) va con la causa. Es un archivo que no abrio; un documento que
+# abrio pero viene en otro formato es UNKNOWN_FORMAT.
+NOT_READ_FULL = f"{NOT_READ} (broken file)"
+
+# Por que no abrio un archivo, en palabras simples: (como empieza el error de
+# la libreria que lo abre -- PyMuPDF, openpyxl, xlrd --, frase). El error
+# tecnico completo queda en la hoja "Not read (broken file)" del Excel.
+NOT_READ_WHY = [
+    ("FileDataError", "the file is damaged or is not a real PDF"),
+    ("EmptyFileError", "the file is empty (0 bytes)"),
+    ("ValueError: document closed or encrypted", "the PDF is password protected"),
+    ("BadZipFile", "the file is damaged, password protected or not a real Excel file"),
+    ("XLRDError", "the file is damaged, password protected or not a real Excel file"),
+    ("PermissionError", "the file is open in another program, or you have no "
+                        "permission to read it"),
+]
+
+
+def not_read_why(error):
+    """Frase simple para el error de un archivo que no abrio."""
+    return next((why for start, why in NOT_READ_WHY if (error or "").startswith(start)),
+                "the tool failed while reading this file")
 
 # (fondo, texto)
 GOOD, BAD = ("#F0FDF4", "#166534"), ("#FEF2F2", "#991B1B")
